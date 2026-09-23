@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .auth import DEFAULT_CREDENTIALS_FILE
 from .client import ParateraError
+from .tasks import JobWaitError, wait_for_jobs
 from .web import (
     DEFAULT_SESSION_FILE,
     WEB_BASE_URL,
@@ -107,6 +108,8 @@ def parser() -> argparse.ArgumentParser:
         )
         c.add_argument("--count", type=positive_int, default=1)
         c.add_argument("--pay-period", type=positive_int, help="months for PrePaid")
+        if name == "create":
+            wait_flags(c)
     for name in ("ssh", "endpoints", "delete"):
         c = leaf(
             commands,
@@ -122,11 +125,13 @@ def parser() -> argparse.ArgumentParser:
             c.add_argument(
                 "--yes", action="store_true", help="confirm irreversible deletion"
             )
+            wait_flags(c)
     power = commands.add_parser("power", help="manage instance power")
     power_commands = power.add_subparsers(dest="power_action", required=True)
     for name in ("on", "off", "reboot"):
         c = leaf(power_commands, name, help=f"power {name} one instance")
         target_flags(c)
+        wait_flags(c)
         if name == "off":
             c.add_argument(
                 "--discard-env",
@@ -139,12 +144,12 @@ def parser() -> argparse.ArgumentParser:
                 help="default: PostPaid STOP_CHARGING, PrePaid KEEP_CHARGING",
             )
     jobs = commands.add_parser("jobs", help="inspect asynchronous tasks")
-    c = leaf(
-        jobs.add_subparsers(dest="jobs_action", required=True),
-        "get",
-        help="query a job once (no polling)",
-    )
+    jobs_commands = jobs.add_subparsers(dest="jobs_action", required=True)
+    c = leaf(jobs_commands, "get", help="query a job once (no polling)")
     c.add_argument("job_uuid", help="job UUID")
+    c = leaf(jobs_commands, "wait", help="wait for job completion")
+    c.add_argument("job_uuid", help="job UUID")
+    wait_timing_flags(c)
     api = commands.add_parser("api", help="low-level access to registered operations")
     api_commands = api.add_subparsers(dest="api_action", required=True)
     leaf(api_commands, "list", help="list registered service.Action operations")
@@ -163,6 +168,49 @@ def positive_int(value: str) -> int:
     if number < 1:
         raise argparse.ArgumentTypeError("must be positive")
     return number
+
+
+def positive_float(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be positive") from None
+    if not 0 < number < float("inf"):
+        raise argparse.ArgumentTypeError("must be positive and finite")
+    return number
+
+
+def wait_timing_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--timeout",
+        type=positive_float,
+        default=600,
+        help="wait deadline in seconds (default: 600)",
+    )
+    p.add_argument(
+        "--poll-interval",
+        type=positive_float,
+        default=5,
+        help="poll interval in seconds (default: 5)",
+    )
+
+
+def wait_flags(p: argparse.ArgumentParser) -> None:
+    group = p.add_mutually_exclusive_group()
+    group.add_argument(
+        "--wait",
+        dest="wait",
+        action="store_true",
+        default=True,
+        help="wait for completion (default)",
+    )
+    group.add_argument(
+        "--no-wait",
+        dest="wait",
+        action="store_false",
+        help="return submitted jobs immediately",
+    )
+    wait_timing_flags(p)
 
 
 def target_flags(p: argparse.ArgumentParser) -> None:
@@ -360,6 +408,34 @@ def ssh_command(entry):
     )
 
 
+async def show_lifecycle_jobs(api, args, jobs):
+    if not args.wait:
+        display(jobs, args)
+        return
+    if not isinstance(jobs, list):
+        raise JobWaitError("Unexpected submission response", [])
+    pending = [
+        job.get("jobUuid")
+        for job in jobs
+        if isinstance(job, dict) and job.get("done") is not True
+    ]
+    if pending:
+        print(
+            f"Waiting for jobs: {', '.join(str(job) for job in pending)}",
+            file=sys.stderr,
+        )
+    display(
+        await wait_for_jobs(
+            api,
+            jobs,
+            timeout=args.timeout,
+            poll_interval=args.poll_interval,
+            batch=args.backend == "web",
+        ),
+        args,
+    )
+
+
 async def dispatch(args, api):
     cmd = args.command
     if cmd == "api":
@@ -463,11 +539,27 @@ async def dispatch(args, api):
         )
     elif cmd in ("quote", "create"):
         operation = "InquiryPriceCreateServices" if cmd == "quote" else "CreateServices"
-        display(await api.call(f"ackcs.{operation}", create_params(args)), args)
+        response = await api.call(f"ackcs.{operation}", create_params(args))
+        if cmd == "create":
+            await show_lifecycle_jobs(api, args, response)
+        else:
+            display(response, args)
     elif cmd == "jobs":
-        display(
-            await api.call("ack_job.DescribeJobs", {"jobUuid": args.job_uuid}), args
-        )
+        if args.jobs_action == "wait":
+            display(
+                await wait_for_jobs(
+                    api,
+                    args.job_uuid,
+                    timeout=args.timeout,
+                    poll_interval=args.poll_interval,
+                    batch=args.backend == "web",
+                ),
+                args,
+            )
+        else:
+            display(
+                await api.call("ack_job.DescribeJobs", {"jobUuid": args.job_uuid}), args
+            )
     elif cmd in ("ssh", "endpoints", "power", "delete"):
         if cmd == "delete" and not args.yes:
             raise CLIError("Deletion blocked: add --yes to confirm")
@@ -509,7 +601,9 @@ async def dispatch(args, api):
                     if billing == "PostPaid" and mode != "STOP_CHARGING":
                         raise CLIError("PostPaid requires STOP_CHARGING")
                     target.update(stoppedMode=mode, saveEnv=not args.discard_env)
-            display(await api.call(f"ackcs.{operation}", target), args)
+            await show_lifecycle_jobs(
+                api, args, await api.call(f"ackcs.{operation}", target)
+            )
 
 
 async def run(args, api=None):
@@ -540,6 +634,13 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         asyncio.run(run(args))
+    except JobWaitError as exc:
+        backend = "--backend web " if args.backend == "web" else ""
+        print(
+            f"paratera: {exc}; check with 'paratera {backend}jobs get JOB_ID'",
+            file=sys.stderr,
+        )
+        return 1
     except (CLIError, ValueError, OSError) as exc:
         print(f"paratera: {exc}", file=sys.stderr)
         return 2
