@@ -38,7 +38,7 @@ uv run paratera jobs get JOB_UUID
 uv run paratera delete --id INSTANCE_UUID --yes
 ```
 
-`get` 分页参数为 `--page` / `--page-size`。需要唯一实例的命令可省略 `--id`，但**仅当账户里恰好一个匹配实例**时才自动选择；多个必须指定 `--id`，可加 `--zone`。`ssh` 只打印正确引用的 `ssh -p PORT USER@HOST` 命令，**不会自动连接**。默认不会打印 SSH 密码、URL 中认证信息或 Jupyter token；确有需要使用 `ssh --show-secrets` 或 `endpoints --show-secrets`。`--json` 仍默认递归脱敏。
+`get` 分页参数为 `--page` / `--page-size`。需要唯一实例的命令可省略 `--id`，但**仅当账户里恰好一个匹配实例**时才自动选择；多个必须指定 `--id`，可加 `--zone`。`ssh` 只打印正确引用的 `ssh -p PORT USER@HOST` 命令，`ssh --json` 返回包含 `command` 和脱敏 `endpoint` 的 JSON，**不会自动连接**。默认不会打印 SSH 密码、URL 中认证信息或 Jupyter token；确有需要使用 `ssh --show-secrets` 或 `endpoints --show-secrets`。`--json` 仍默认递归脱敏。
 
 `create` 和 `quote` 均要求 `--zone`、`--name`、`--model`、`--image`，默认 `--billing-type PostPaid --count 1`；包月使用 `--billing-type PrePaid --pay-period MONTHS`。**创建可能冻结/扣除余额**；建议先 `quote` 再自行决定是否 `create`，命令不会强制交互。询价文档的请求体未给出完整示例，目前 CLI 传入与创建相同参数，尚未线上验证。
 

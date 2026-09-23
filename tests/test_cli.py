@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
-from paratera_cli.cli import CLIError, create_params, dispatch, parser, read_params, scrub, select_instance, ssh_command
+from paratera_cli.cli import CLIError, create_params, dispatch, main, parser, read_params, run, scrub, select_instance, ssh_command
+from paratera_cli.client import ParateraError
 
 
 class FakeAPI:
@@ -59,13 +62,22 @@ def test_select_instance_requires_exactly_one_and_paginates():
     api = FakeAPI({"ackcs.DescribeServices": {"rows": [instance()]}})
     asyncio.run(select_instance(api, args))
     assert api.calls[0][1]["serviceUuid"] == "instance-1"
+    wrong = [instance(f"other-{i}") for i in range(100)]
+    pages = FakeAPI({"ackcs.DescribeServices": lambda params: {"rows": wrong if params["pageNum"] == 1 else [instance()]}})
+    assert asyncio.run(select_instance(pages, args))[1]["serviceUuids"] == ["instance-1"]
+    assert len(pages.calls) == 2
+    repeated = FakeAPI({"ackcs.DescribeServices": {"rows": wrong}})
+    with pytest.raises(CLIError, match="repeated page"):
+        asyncio.run(select_instance(repeated, args))
+    assert len(repeated.calls) == 2
 
 
 def test_ssh_command_and_secret_redaction(capsys):
     entry = {"url": "ssh://pod@host.example:3456", "password": "private"}
     assert ssh_command(entry) == "ssh -p 3456 pod@host.example"
     api = execute(["ssh", "--json"], {"ackcs.DescribeServices": {"rows": [instance()]}, "ackcs.DescribeServicesSSH": {"sshes": [entry]}})
-    assert "private" not in capsys.readouterr().out
+    shown = json.loads(capsys.readouterr().out)
+    assert shown == {"command": "ssh -p 3456 pod@host.example", "endpoint": {"url": "ssh://pod@host.example:3456", "password": "[REDACTED]"}}
     assert api.calls[-1][1] == {"zoneCode": "zone-1", "serviceUuids": ["instance-1"]}
     data = {"password": "private", "items": [{"secretKey": "private", "urls": ["https://u:p@host/lab?token=private#fragment"]}]}
     safe = json.dumps(scrub(data))
@@ -94,6 +106,20 @@ def test_off_selects_prepaid_mode_and_preserves_environment(capsys):
 def test_delete_blocked_without_yes():
     with pytest.raises(CLIError, match="--yes"):
         execute(["delete", "--id", "instance-1", "--zone", "zone-1"], {})
+
+
+def test_api_list_requires_no_credentials(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "paratera_cli.api", SimpleNamespace(OPERATIONS={"region.DescribeZones": object()}))
+    assert asyncio.run(run(parser().parse_args(["api", "list"]))) is None
+    assert "region.DescribeZones" in capsys.readouterr().out
+
+
+def test_client_error_message_is_preserved(monkeypatch, capsys):
+    async def fail(args):
+        raise ParateraError("Paratera HTTP request failed (status 429)")
+    monkeypatch.setattr("paratera_cli.cli.run", fail)
+    assert main(["zones"]) == 1
+    assert "status 429" in capsys.readouterr().err
 
 
 def test_api_call_json_file(tmp_path, capsys):

@@ -9,6 +9,7 @@ import sys
 from urllib.parse import urlsplit, urlunsplit
 
 from .auth import DEFAULT_CREDENTIALS_FILE
+from .client import ParateraError
 
 
 class CLIError(Exception):
@@ -152,19 +153,25 @@ async def select_instance(api, args):
     if args.zone:
         params["zoneCode"] = args.zone
     rows = []
+    seen_pages = set()
     while True:
         page = await api.call("ackcs.DescribeServices", params)
         if not isinstance(page, dict) or not isinstance(page.get("rows"), list):
             raise CLIError("Unexpected DescribeServices response (expected data.rows)")
         batch = page["rows"]
-        rows.extend(batch)
-        if len(batch) < params["pageSize"]:
+        fingerprint = tuple((item.get("serviceUuid"), cell_at(item, "zone.zoneCode")) for item in batch)
+        if batch and fingerprint in seen_pages:
+            raise CLIError("DescribeServices returned a repeated page; cannot select safely")
+        seen_pages.add(fingerprint)
+        rows.extend(item for item in batch if (not args.id or item.get("serviceUuid") == args.id) and (not args.zone or cell_at(item, "zone.zoneCode") == args.zone))
+        if len(rows) > 1:
+            raise CLIError("Multiple instances match; specify --id (and --zone if needed)")
+        total = page.get("total")
+        if len(batch) < params["pageSize"] and not (isinstance(total, int) and total > params["pageNum"] * params["pageSize"]):
             break
         params["pageNum"] += 1
     if not rows:
         raise CLIError("No matching instances")
-    if len(rows) != 1:
-        raise CLIError("Multiple instances match; specify --id (and --zone if needed)")
     instance = rows[0]
     service_uuid = instance.get("serviceUuid") or args.id
     zone = args.zone or cell_at(instance, "zone.zoneCode")
@@ -238,14 +245,17 @@ async def dispatch(args, api):
             entries = data.get("sshes", [])
             if len(entries) != 1:
                 raise CLIError("Expected exactly one SSH endpoint")
-            print(ssh_command(entries[0]))
-            if args.show_secrets and entries[0].get("password"):
-                print("password:", entries[0]["password"])
+            command = ssh_command(entries[0])
+            if args.json:
+                display({"command": command, "endpoint": entries[0]}, args)
+            else:
+                print(command)
+                if args.show_secrets and entries[0].get("password"):
+                    print("password:", entries[0]["password"])
         elif cmd == "endpoints":
-            endpoints = {}
-            for name in ("SSH", "Jupyter", "TensorBoard"):
-                endpoints[name.lower()] = await api.call(f"ackcs.DescribeServices{name}", target)
-            display(endpoints, args)
+            names = ("SSH", "Jupyter", "TensorBoard")
+            responses = await asyncio.gather(*(api.call(f"ackcs.DescribeServices{name}", target) for name in names))
+            display(dict(zip((name.lower() for name in names), responses)), args)
         else:
             if cmd == "delete":
                 operation = "DeleteServices"
@@ -263,7 +273,7 @@ async def dispatch(args, api):
 
 
 async def run(args, api=None):
-    if api is not None:
+    if api is not None or (args.command == "api" and args.api_action == "list"):
         await dispatch(args, api)
         return
     # Lazy import lets --help and parser tests run before api.py is available.
@@ -280,8 +290,11 @@ def main(argv=None):
     except (CLIError, ValueError, OSError) as exc:
         print(f"paratera: {exc}", file=sys.stderr)
         return 2
+    except ParateraError as exc:
+        print(f"paratera: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
-        # API client errors are intentionally generic and never include response bodies.
+        # Unexpected errors must not expose response bodies or credentials.
         print(f"paratera: request failed ({type(exc).__name__})", file=sys.stderr)
         return 1
     return 0
