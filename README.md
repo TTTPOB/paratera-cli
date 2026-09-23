@@ -1,5 +1,7 @@
 # Paratera CLI
 
+项目仓库：[TTTPOB/paratera-cli](https://github.com/TTTPOB/paratera-cli)。
+
 基于 **httpx2 异步客户端**的个人容器 CLI。当前默认 `--backend web`：复用**本人已登录**的网页登录态；不收集用户名、密码或验证码，也不采用过时的官方 Python SDK。文档 OpenAPI 的签名协议另行封装，当前生产 `/v3` 入口不可达，不能当作可用替代方案。
 
 `uv sync` 后用 `uv run paratera --help` 查看命令。CLI 默认使用 `web`；如确需文档 OpenAPI，可在子命令前显式指定全局选项 `--backend openapi`，但生产 `/v3` 入口目前不可用。
@@ -39,7 +41,7 @@ uv run paratera jobs get JOB_UUID
 uv run paratera delete --id INSTANCE_UUID --yes
 ```
 
-**实测范围**（详见[验证记录](docs/live-validation.md)）：网页登录态 zones、types、availability、images（含分页）、get、quote、create、SSH/附加端点**查询**以及默认等待的 power on/reboot/off/delete 均通过；删除后活动和 Recycled 列表均未找到该测试实例。未执行 SSH 远程登录命令，也未验证文件持久性或实际扣款。网页模式仅映射常用子集，不等同于公开文档全部 46 个操作可用。
+**实测范围**（详见[验证记录](docs/live-validation.md)）：网页登录态 zones、types、availability、images（含分页）、get、quote、create、SSH/附加端点**查询**以及默认等待的 power on/reboot/off/delete 均通过；删除后活动和 Recycled 列表均未找到该测试实例。已另行通过实际 SSH 登录执行只读识别命令并成功退出；文件持久性和实际扣款仍未验证。网页模式仅映射常用子集，不等同于公开文档全部 46 个操作可用。
 
 `get` 支持 `--page/--page-size`、`--id/--zone`。需要唯一实例时可省略 `--id`，但账户中必须恰好只有一个匹配项。`ssh` 仅打印 `ssh -p PORT USER@HOST`，**不会自动连接**；`ssh --json`、`endpoints` 默认脱敏密码及 URL 中 token，仅显式 `--show-secrets` 才显示，请勿粘贴其原始输出。创建默认按需 `--billing-type PostPaid --count 1`，包月使用 `--billing-type PrePaid --pay-period MONTHS`；创建会冻结或扣费，不强制交互，请先询价。网页 `images` 的 `imageUuid` 是已归一的创建用 ID：公共镜像取原始 `imageId`，而原始 `ackci-…` 在 `sourceImageUuid`，不要将后者当网页创建参数。
 
