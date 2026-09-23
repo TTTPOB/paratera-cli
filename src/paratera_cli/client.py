@@ -1,6 +1,7 @@
 """Long-lived asynchronous Paratera API client."""
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +11,32 @@ from .auth import load_credentials
 from .signing import sign_headers
 
 
+def _safe_business_code(code: Any) -> int | str | None:
+    if type(code) is int:
+        return code
+    if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code):
+        return code
+    return None
+
+
 class ParateraError(Exception):
-    """An HTTP, transport, or business-level Paratera request failure."""
+    """A request failure with only safe, structured diagnostic fields."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        business_code: int | str | None = None,
+        service: str | None = None,
+        action: str | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.business_code = _safe_business_code(business_code)
+        self.service = service
+        self.action = action
+        suffix = f" (code {self.business_code})" if self.business_code is not None else ""
+        super().__init__(message + suffix)
 
 
 class ParateraClient:
@@ -64,14 +89,23 @@ class ParateraClient:
         )
         try:
             response = await self._http.post(self._base_url + endpoint, content=body, headers=headers)
-        except Exception:
-            raise ParateraError("Paratera request failed") from None
-        if not 200 <= response.status_code < 300:
-            raise ParateraError(f"Paratera HTTP request failed (status {response.status_code})")
+        except httpx2.HTTPError:
+            raise ParateraError("Paratera request failed", service=service, action=action) from None
         try:
             payload = response.json()
         except (ValueError, TypeError):
-            raise ParateraError("Invalid Paratera response") from None
-        if not isinstance(payload, dict) or payload.get("code") != 200:
-            raise ParateraError("Paratera API request failed")
+            payload = None
+        code = _safe_business_code(payload.get("code")) if isinstance(payload, dict) else None
+        details = {
+            "status_code": response.status_code,
+            "business_code": code,
+            "service": service,
+            "action": action,
+        }
+        if not 200 <= response.status_code < 300:
+            raise ParateraError("Paratera HTTP request failed", **details)
+        if not isinstance(payload, dict):
+            raise ParateraError("Invalid Paratera response", **details)
+        if payload.get("code") != 200:
+            raise ParateraError("Paratera API request failed", **details)
         return payload.get("data")

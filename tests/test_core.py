@@ -79,9 +79,10 @@ def test_request_body_path_response_and_close():
 
 
 def test_business_and_http_errors_redacted():
-    for status, payload in [
-        (200, {"code": 403, "message": "fake-secret"}),
-        (503, {"code": 200, "data": "fake-secret"}),
+    for status, payload, expected_code in [
+        (200, {"code": 403, "message": "fake-secret"}, 403),
+        (503, {"code": "ServerError", "data": "fake-secret"}, "ServerError"),
+        (200, {"code": "fake-secret with spaces", "message": "fake-secret"}, None),
     ]:
         transport = httpx2.MockTransport(lambda request: httpx2.Response(status, json=payload))
 
@@ -91,5 +92,9 @@ def test_business_and_http_errors_redacted():
                     await client.request("region", "DescribeZones")
                 assert "fake-secret" not in str(error.value)
                 assert "fake-access" not in str(error.value)
+                assert error.value.status_code == status
+                assert error.value.business_code == expected_code
+                assert error.value.service == "region"
+                assert error.value.action == "DescribeZones"
 
         asyncio.run(run())
