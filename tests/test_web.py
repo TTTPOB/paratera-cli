@@ -168,9 +168,13 @@ def test_web_mapper_zone_conversion_and_auth(tmp_path, monkeypatch):
                 and r[1]["Ai-Authorization"] == "Bearer secret"
                 for r in requests
             )
-            assert "ackcs.RebootServices" not in WEB_OPERATIONS
-            with pytest.raises(ValueError, match="does not support"):
-                await api.call("ackcs.RebootServices")
+            assert "ackcs.RebootServices" in WEB_OPERATIONS
+            await api.call(
+                "ackcs.RebootServices",
+                {"zoneCode": "cn-test-a", "serviceUuids": ["one"]},
+            )
+            assert requests[-1][0].path == "/platform/ack/service/reboot"
+            assert requests[-1][2] == {"zoneId": 50, "serviceUuids": ["one"]}
             with pytest.raises(ValueError, match="Zone code not found"):
                 await api.call(
                     "ackcs.StartServices",
