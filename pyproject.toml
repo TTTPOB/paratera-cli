@@ -21,3 +21,12 @@ packages = ["src/paratera_cli"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+src = ["src"]
+
+[tool.pyrefly]
+preset = "basic"
+project-includes = ["src", "tests", "scripts"]
+search-path = ["src"]
