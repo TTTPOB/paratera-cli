@@ -53,7 +53,7 @@ uv run paratera delete --id INSTANCE_UUID --yes
 
 `create` 和 `quote` 均要求 `--zone`、`--name`、`--model`、`--image`，默认 `--billing-type PostPaid --count 1`；包月使用 `--billing-type PrePaid --pay-period MONTHS`。**创建可能冻结/扣除余额**；建议先 `quote` 再自行决定是否 `create`，命令不会强制交互。询价文档的请求体未给出完整示例，目前 CLI 传入与创建相同参数，尚未线上验证。
 
-`power off` 默认 `saveEnv=true` 保留环境；只有显式 `--discard-env` 才传 `false`，可能删除文件和配置。按需计费默认 `STOP_CHARGING`（停机释放计算资源、后续可能无法开机），包月自动用 `KEEP_CHARGING`（关机仍计费）。可显式 `--stopped-mode STOP_CHARGING|KEEP_CHARGING`，但与查询到的计费类型冲突会报错。`delete` 必须 `--yes` 才发请求。创建、开关机、重启和删除都是**异步任务**：返回的 `jobUuid` 只表示已提交，不表示执行成功；用 `jobs get JOB_UUID` 单次查询 `done` / `success`，命令不会自动轮询。
+`power off` 默认 `saveEnv=true` 保留环境；只有显式 `--discard-env` 才传 `false`，可能删除文件和配置。按需计费默认 `STOP_CHARGING`（停机释放计算资源、后续可能无法开机），包月自动用 `KEEP_CHARGING`（关机仍计费）。可显式 `--stopped-mode STOP_CHARGING|KEEP_CHARGING`，但与查询到的计费类型冲突会报错。`delete` 必须 `--yes` 才发请求。创建、开关机、重启和删除都是**异步任务**：CLI 默认等待全部返回的 job 完成且成功，默认超时 600 秒、每 5 秒低频批量查询一次；可用 `--timeout SECONDS --poll-interval SECONDS` 调整，或显式 `--wait`。`--no-wait` 只提交并立即输出原始 jobs，`jobUuid` 只代表已受理、不代表成功；`jobs get JOB_UUID` 单次查询，`jobs wait JOB_UUID` 等待完成。任务失败或等待超时命令返回非零；超时后任务**可能继续运行**，请用输出的 job ID 和 `jobs get JOB_UUID` 后续确认。`--json` 标准输出只含最终 JSON（等待提示仅在标准错误输出）。Python SDK 可直接调用 `paratera_cli.tasks.wait_for_jobs(api, jobs_or_ids)`；底层 `api.call` 保持提交即返回。
 
 ## 底层接口和 SDK
 

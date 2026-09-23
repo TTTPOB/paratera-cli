@@ -183,7 +183,7 @@ def test_endpoints_redact_jupyter_token(capsys):
 
 def test_off_selects_prepaid_mode_and_preserves_environment(capsys):
     api = execute(
-        ["power", "off", "--json"],
+        ["power", "off", "--json", "--no-wait"],
         {
             "ackcs.DescribeServices": {"rows": [instance(billing="PrePaid")]},
             "ackcs.StopServices": [{"jobUuid": "j", "done": False, "success": False}],
@@ -199,6 +199,91 @@ def test_off_selects_prepaid_mode_and_preserves_environment(capsys):
         },
     )
     assert json.loads(capsys.readouterr().out)[0]["done"] is False
+
+
+def test_lifecycle_default_wait_and_no_wait(capsys):
+    create = [
+        "create",
+        "--zone",
+        "z",
+        "--name",
+        "n",
+        "--model",
+        "m",
+        "--image",
+        "i",
+        "--json",
+    ]
+    submitted = [{"jobUuid": "j", "done": False, "success": False}]
+    finished = [{"jobUuid": "j", "done": True, "success": True}]
+    for flags, expected_calls, expected_output in (
+        ([], 2, finished),
+        (["--no-wait"], 1, submitted),
+        (["--wait"], 2, finished),
+    ):
+        api = execute(
+            create + flags,
+            {
+                "ackcs.CreateServices": submitted,
+                "ack_job.DescribeJobs": finished,
+            },
+        )
+        output = capsys.readouterr()
+        assert json.loads(output.out) == expected_output
+        assert len(api.calls) == expected_calls
+        if expected_calls == 2:
+            assert api.calls[-1] == ("ack_job.DescribeJobs", {"jobUuid": "j"})
+            assert "j" in output.err
+        else:
+            assert output.err == ""
+
+
+def test_power_and_delete_default_wait(capsys):
+    for command, operation in (
+        (["power", "on"], "StartServices"),
+        (["delete", "--yes"], "DeleteServices"),
+    ):
+        api = execute(
+            command + ["--json"],
+            {
+                "ackcs.DescribeServices": {"rows": [instance()]},
+                f"ackcs.{operation}": [{"jobUuid": "j", "done": True, "success": True}],
+            },
+        )
+        assert len(api.calls) == 2
+        assert json.loads(capsys.readouterr().out)[0]["success"] is True
+
+
+def test_jobs_wait_queries_completion(capsys):
+    api = execute(
+        ["jobs", "wait", "j", "--json"],
+        {"ack_job.DescribeJobs": [{"jobUuid": "j", "done": True, "success": True}]},
+    )
+    assert api.calls == [("ack_job.DescribeJobs", {"jobUuid": "j"})]
+    assert json.loads(capsys.readouterr().out)[0]["done"] is True
+
+
+def test_wait_failure_returns_nonzero_without_response_leak(monkeypatch, capsys):
+    from paratera_cli.tasks import JobWaitError
+
+    async def fail(args):
+        raise JobWaitError("Job failed", ["j"])
+
+    monkeypatch.setattr("paratera_cli.cli.run", fail)
+    assert main(["jobs", "wait", "j", "--json"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "jobs get JOB_ID" in output.err
+
+
+def test_wait_arguments_reject_nonpositive():
+    for flag, value in (
+        ("--timeout", "0"),
+        ("--poll-interval", "-1"),
+        ("--timeout", "nan"),
+    ):
+        with pytest.raises(SystemExit):
+            parser().parse_args(["jobs", "wait", "j", flag, value])
 
 
 def test_delete_blocked_without_yes():
