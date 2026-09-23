@@ -73,7 +73,7 @@ class WebClient:
                                 business_code=code)
         if not isinstance(payload, dict):
             raise ParateraError("Invalid Paratera website response", status_code=response.status_code)
-        if code not in (0, 200, "200"):
+        if code != 200:
             raise ParateraError("Paratera website API request failed", status_code=response.status_code,
                                 business_code=code)
         return payload.get("data")
@@ -98,11 +98,12 @@ class WebParateraAPI:
         self.client = client
         self._zones: dict[str, dict[str, Any]] | None = None
 
-    async def _zone_catalog(self) -> dict[str, dict[str, Any]]:
+    async def _zone_catalog(self, raw: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
         if self._zones is None:
-            raw = await self.client.request(
-                "/platform/resourceContainerService/getResourceContainerServiceList", method="GET"
-            )
+            if raw is None:
+                raw = await self.client.request(
+                    "/platform/resourceContainerService/getResourceContainerServiceList", method="GET"
+                )
             if not isinstance(raw, list):
                 raise ParateraError("Unexpected website zone directory shape")
             catalog: dict[str, dict[str, Any]] = {}
@@ -139,7 +140,7 @@ class WebParateraAPI:
             data = await self.client.request("/platform/resourceContainerService/getResourceContainerServiceList", method="GET")
             if not isinstance(data, list):
                 raise ParateraError("Unexpected website service types shape")
-            zones = await self._zone_catalog()
+            zones = await self._zone_catalog(data)
             by_id = {z.get("zoneId"): z for z in zones.values()}
             return [{**row, "zone": {"zoneCode": by_id[row.get("zoneId")]["zoneCode"]}}
                     if isinstance(row, dict) and row.get("zoneId") in by_id else row for row in data]
@@ -147,7 +148,7 @@ class WebParateraAPI:
             images: list[dict[str, Any]] = []
             for page_num in range(1, 101):
                 data = await self.client.request("/platform/resourceContainerImage/getResourceCommonImage",
-                                                 {"pageNum": page_num, "pageSize": 10})
+                                                 {"pageNum": page_num, "pageSize": 100})
                 if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
                     raise ParateraError("Unexpected website public images shape")
                 rows = data["rows"]
@@ -159,14 +160,22 @@ class WebParateraAPI:
                 total = data.get("total")
                 if isinstance(total, int) and len(images) >= total:
                     break
-                if len(rows) < 10:
+                if len(rows) < 100:
                     break
             else:
                 raise ParateraError("Website public image listing exceeded 100 pages")
             zones = await self._zone_catalog()
             by_id = {zone["zoneId"]: zone["zoneCode"] for zone in zones.values()}
-            return [{**row, "zone": {"zoneCode": by_id[row["zoneId"]]}}
-                    if row.get("zoneId") in by_id else row for row in images]
+            normalized: list[dict[str, Any]] = []
+            for row in images:
+                creation_id = row.get("imageId") or row.get("providerImageUuid")
+                if not isinstance(creation_id, str) or not creation_id:
+                    raise ParateraError("Website public image has no usable creation ID")
+                item = {**row, "sourceImageUuid": row.get("imageUuid"), "imageUuid": creation_id}
+                if row.get("zoneId") in by_id:
+                    item["zone"] = {"zoneCode": by_id[row["zoneId"]]}
+                normalized.append(item)
+            return normalized
         if operation == "ack_product.DescribeACKAvailableResources":
             models = p.get("serviceModels")
             if not isinstance(models, list):
@@ -227,10 +236,12 @@ class WebParateraAPI:
             if operation == "ackcs.CreateServices":
                 if any(not p.get(key) for key in ("aliasName", "imageUuid")):
                     raise ValueError("Missing website service creation parameters")
-                allowed = {*required, "aliasName", "imageUuid", "count", "payPeriod", "autoContinue", "password"}
+                allowed = {*required, "aliasName", "imageUuid", "count", "payPeriod", "autoContinue", "password", "volumes"}
                 self._check_params(p, allowed)
                 if p["billingType"] == "PostPaid":
                     p.pop("payPeriod", None)
+                p.setdefault("count", 1)
+                p.setdefault("autoContinue", False)
                 return await self.client.request("/platform/ack/service/create", {**location, **p})
             allowed = {*required, "aliasName", "imageUuid", "count", "payPeriod", "volumes"}
             self._check_params(p, allowed)

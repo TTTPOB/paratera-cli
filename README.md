@@ -65,7 +65,7 @@ uv run paratera api call ack_job.DescribeJobs --params @request.json
 
 `api list` 在 OpenAPI 后端展示 `OPERATIONS` 签名接口注册表；在网页后端**仅**展示已经映射的网页操作。`api call` 使用兼容的 `service.Action` 名称与 JSON 对象参数，但网页后端仅转换确证的网页路径、字段，并非声称同名 /v3 签名接口可用；未支持操作明确报错。网页 zoneCode 通过规格目录映射到 zoneId/regionId/clusterId，绝不直接重命名。网页镜像目录的分页和返回形状与 OpenAPI 不同；停止服务默认保留环境，实际破坏性行为须自行核对。
 
-网页请求的公开前端依据：[ack](https://ai.paratera.com/assets/js/ack-D4I28UNm.js)、[containerList](https://ai.paratera.com/assets/js/containerList-C36_4OnN.js)、[add](https://ai.paratera.com/assets/js/add-CWKrfx1I.js)。目前只有目录、镜像分页、库存、询价与响应信封经只读实测；写操作与非空实例返回归一仍待真实验证。网页后端不支持 `power reboot`。镜像返回 `imageId` 与 `imageUuid` 两种字段，创建实际采用哪个值仍须核实，不应凭字段名推断。目录 `listPrice` 为 0 **不代表免费**：询价实际可返回非零价格；创建前请先 `quote` 核对返回价。
+网页请求的公开前端依据：[ack](https://ai.paratera.com/assets/js/ack-D4I28UNm.js)、[containerList](https://ai.paratera.com/assets/js/containerList-C36_4OnN.js)、[add](https://ai.paratera.com/assets/js/add-CWKrfx1I.js)。目前只有目录、镜像分页、库存、询价与响应信封经只读实测；写操作与非空实例返回归一仍待真实验证。网页后端不支持 `power reboot`。网页 `images` 输出的 `imageUuid` 已归一成创建接口所需 ID：优先公共镜像 `imageId`，否则使用 `providerImageUuid`；源数据中的 `imageUuid`（可能是 `ackci-...`）另存为 `sourceImageUuid`。`create --image` 请直接使用 `--backend web images` 所返回的 `imageUuid`，不要使用 `sourceImageUuid`。目录 `listPrice` 为 0 **不代表免费**：询价实际可返回非零价格；创建前请先 `quote` 核对返回价。
 
 ```python
 import asyncio

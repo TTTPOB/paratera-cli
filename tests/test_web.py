@@ -72,6 +72,15 @@ def test_web_mapper_zone_conversion_and_auth(tmp_path, monkeypatch):
             assert requests[-1][2] == {"zoneId": 50, "regionId": 38, "clusterId": 39,
                                         "containerService": [{"resourceModel": "gpu.small"}],
                                         "billingType": "PostPaid", "count": 1}
+            await api.call("ackcs.CreateServices", {"zoneCode": "cn-test-a", "serviceModel": "gpu.small",
+                                                     "billingType": "PostPaid", "aliasName": "n",
+                                                     "imageUuid": "sha256:public",
+                                                     "volumes": [{"volumeType": "LOCAL", "volumeSize": 100}]})
+            assert requests[-1][2] == {"zoneId": 50, "regionId": 38, "clusterId": 39,
+                                        "serviceModel": "gpu.small", "billingType": "PostPaid",
+                                        "aliasName": "n", "imageUuid": "sha256:public",
+                                        "volumes": [{"volumeType": "LOCAL", "volumeSize": 100}],
+                                        "count": 1, "autoContinue": False}
             assert all(r[0].host == "ai.paratera.com" for r in requests)
             assert all(r[1]["token"] == "secret" and r[1]["Ai-Authorization"] == "Bearer secret" for r in requests)
             assert "ackcs.RebootServices" not in WEB_OPERATIONS
@@ -79,6 +88,30 @@ def test_web_mapper_zone_conversion_and_auth(tmp_path, monkeypatch):
                 await api.call("ackcs.RebootServices")
             with pytest.raises(ValueError, match="Zone code not found"):
                 await api.call("ackcs.StartServices", {"zoneCode": "missing", "serviceUuids": ["one"]})
+    asyncio.run(verify())
+
+
+def test_web_images_use_frontend_creation_id(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARATERA_TOKEN", raising=False)
+    session = tmp_path / "session.json"
+    session.write_text('{"token":"test"}', encoding="utf-8")
+    images = [
+        {"zoneId": 50, "imageId": "sha256:public", "imageUuid": "ackci-original"},
+        {"zoneId": 50, "providerImageUuid": "provider-private", "imageUuid": "ackci-other"},
+    ]
+    def handler(request):
+        if request.url.path.endswith("getResourceContainerServiceList"):
+            data = CATALOG
+        else:
+            assert json.loads(request.content) == {"pageNum": 1, "pageSize": 100}
+            data = {"pageNum": 1, "total": 2, "rows": images}
+        return httpx2.Response(200, json={"code": 200, "data": data})
+    async def verify():
+        async with WebClient(session_file=session, transport=httpx2.MockTransport(handler)) as client:
+            result = await WebParateraAPI(client).call("ack_product.DescribeACKPublicImages")
+            assert [row["imageUuid"] for row in result] == ["sha256:public", "provider-private"]
+            assert [row["sourceImageUuid"] for row in result] == ["ackci-original", "ackci-other"]
+            assert result[0]["zone"]["zoneCode"] == "cn-test-a"
     asyncio.run(verify())
 
 
