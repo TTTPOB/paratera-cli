@@ -133,6 +133,7 @@ WEB_OPERATIONS = frozenset(
         "ackcs.InquiryPriceCreateServices",
         "ackcs.CreateServices",
         "ackcs.StartServices",
+        "ackcs.RebootServices",
         "ackcs.StopServices",
         "ackcs.DeleteServices",
         "ackcs.DescribeServicesSSH",
@@ -424,6 +425,7 @@ class WebParateraAPI:
         self._check_params(p, set())
         routes = {
             "StartServices": "start",
+            "RebootServices": "reboot",
             "StopServices": "stop",
             "DeleteServices": "delete",
             "DescribeServicesSSH": "describe/ssh",
