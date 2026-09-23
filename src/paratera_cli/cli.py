@@ -40,8 +40,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--backend",
         choices=("openapi", "web"),
-        default="openapi",
-        help="API backend (default: openapi)",
+        default="web",
+        help="API backend (default: web)",
     )
     p.add_argument(
         "--session-file",
@@ -635,7 +635,7 @@ def main(argv=None):
     try:
         asyncio.run(run(args))
     except JobWaitError as exc:
-        backend = "--backend web " if args.backend == "web" else ""
+        backend = f"--backend {args.backend} "
         print(
             f"paratera: {exc}; check with 'paratera {backend}jobs get JOB_ID'",
             file=sys.stderr,

@@ -31,8 +31,8 @@ def test_session_import_and_backend_defaults(tmp_path, monkeypatch, capsys):
     assert json.loads(path.read_text()) == {"token": "safe-token"}
     assert path.stat().st_mode & 0o777 == 0o600
     assert "safe-token" not in capsys.readouterr().out
-    assert parser().parse_args(["zones"]).backend == "openapi"
-    assert parser().parse_args(["--backend", "web", "zones"]).base_url is None
+    assert parser().parse_args(["zones"]).backend == "web"
+    assert parser().parse_args(["--backend", "openapi", "zones"]).base_url is None
     monkeypatch.setenv("PARATERA_TOKEN", "from-env")
 
     async def verify():

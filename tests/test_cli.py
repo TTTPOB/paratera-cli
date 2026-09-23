@@ -58,6 +58,8 @@ def test_help_and_payload():
         "billingType": "PostPaid",
         "count": 1,
     }
+    assert args.backend == "web"
+    assert parser().parse_args(["--backend", "openapi", "zones"]).backend == "openapi"
     assert read_params('{"x":1}') == {"x": 1}
     with pytest.raises(CLIError):
         read_params("[]")
@@ -273,9 +275,9 @@ def test_wait_failure_returns_nonzero_without_response_leak(monkeypatch, capsys)
     assert main(["jobs", "wait", "j", "--json"]) == 1
     output = capsys.readouterr()
     assert output.out == ""
-    assert "paratera jobs get JOB_ID" in output.err
-    assert main(["--backend", "web", "jobs", "wait", "j"]) == 1
-    assert "paratera --backend web jobs get JOB_ID" in capsys.readouterr().err
+    assert "paratera --backend web jobs get JOB_ID" in output.err
+    assert main(["--backend", "openapi", "jobs", "wait", "j"]) == 1
+    assert "paratera --backend openapi jobs get JOB_ID" in capsys.readouterr().err
 
 
 def test_wait_arguments_reject_nonpositive():
