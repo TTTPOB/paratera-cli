@@ -3,13 +3,16 @@
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
+import tempfile
 import shlex
 import sys
 from urllib.parse import urlsplit, urlunsplit
 
 from .auth import DEFAULT_CREDENTIALS_FILE
 from .client import ParateraError
+from .web import DEFAULT_SESSION_FILE, WEB_BASE_URL, WEB_OPERATIONS, WebClient, WebParateraAPI
 
 
 class CLIError(Exception):
@@ -19,7 +22,9 @@ class CLIError(Exception):
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="paratera", description="Paratera container CLI; requests use the asynchronous API client")
     p.add_argument("--credentials-file", default=str(DEFAULT_CREDENTIALS_FILE), help="ENV=val credentials file (default: %(default)s); environment variables take precedence")
-    p.add_argument("--base-url", default="https://ai.blsc.cn", help="API base URL (default: %(default)s)")
+    p.add_argument("--base-url", help="override backend's base URL")
+    p.add_argument("--backend", choices=("openapi", "web"), default="openapi", help="API backend (default: openapi)")
+    p.add_argument("--session-file", default=str(DEFAULT_SESSION_FILE), help="web session JSON (default: %(default)s)")
     p.add_argument("--json", action="store_true", help="print redacted JSON")
     p.add_argument("--show-secrets", action="store_true", help="explicitly show SSH password and authenticated URLs")
     commands = p.add_subparsers(dest="command", required=True)
@@ -30,6 +35,8 @@ def parser() -> argparse.ArgumentParser:
         child.add_argument("--show-secrets", action="store_true", default=argparse.SUPPRESS, help="show SSH password and authenticated URLs")
         return child
 
+    session = commands.add_parser("session", help="manage existing website login session")
+    leaf(session.add_subparsers(dest="session_action", required=True), "import", help="read token or JSON from stdin and store mode 0600")
     leaf(commands, "zones", help="list available zones")
     for name, help_text in [("types", "list instance types"), ("availability", "check all instance types in one batch"), ("images", "list public images")]:
         c = leaf(commands, name, help=help_text)
@@ -132,6 +139,32 @@ def create_params(args):
     return result
 
 
+def import_session(path: str | Path) -> None:
+    raw = sys.stdin.read().strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = raw
+    token = parsed.get("token") if isinstance(parsed, dict) else parsed
+    if not isinstance(token, str):
+        raise CLIError("Session input must be a token or JSON with token")
+    token = token.strip().removeprefix("Bearer ").strip()
+    if not token or any(char.isspace() for char in token):
+        raise CLIError("Invalid session token")
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(prefix=".paratera-session-", dir=destination.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump({"token": token}, file)
+            file.write("\n")
+        os.chmod(name, 0o600)
+        os.replace(name, destination)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def read_params(raw):
     if raw.startswith("@"):
         if len(raw) == 1:
@@ -198,8 +231,11 @@ async def dispatch(args, api):
     cmd = args.command
     if cmd == "api":
         if args.api_action == "list":
-            from .api import OPERATIONS
-            display(sorted(OPERATIONS), args)
+            if args.backend == "web":
+                display(sorted(WEB_OPERATIONS), args)
+            else:
+                from .api import OPERATIONS
+                display(sorted(OPERATIONS), args)
         else:
             display(await api.call(args.operation, read_params(args.params)), args)
     elif cmd == "zones":
@@ -273,14 +309,21 @@ async def dispatch(args, api):
 
 
 async def run(args, api=None):
+    if args.command == "session":
+        if args.session_action == "import":
+            import_session(args.session_file)
+        return
     if api is not None or (args.command == "api" and args.api_action == "list"):
         await dispatch(args, api)
         return
-    # Lazy import lets --help and parser tests run before api.py is available.
-    from .api import ParateraAPI
-    from .client import ParateraClient
-    async with ParateraClient(credentials_file=args.credentials_file, base_url=args.base_url) as client:
-        await dispatch(args, ParateraAPI(client))
+    if args.backend == "web":
+        async with WebClient(session_file=args.session_file, base_url=args.base_url or WEB_BASE_URL) as client:
+            await dispatch(args, WebParateraAPI(client))
+    else:
+        from .api import ParateraAPI
+        from .client import ParateraClient
+        async with ParateraClient(credentials_file=args.credentials_file, base_url=args.base_url or "https://ai.blsc.cn") as client:
+            await dispatch(args, ParateraAPI(client))
 
 
 def main(argv=None):
