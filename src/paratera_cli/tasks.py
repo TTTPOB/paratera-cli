@@ -11,9 +11,7 @@ class JobWaitError(Exception):
 
     def __init__(self, message: str, job_ids: Sequence[str]) -> None:
         self.job_ids = tuple(job_ids)
-        super().__init__(
-            f"{message}: {', '.join(self.job_ids)}; check with 'paratera jobs get JOB_ID'"
-        )
+        super().__init__(f"{message}: {', '.join(self.job_ids)}")
 
 
 class JobTimeoutError(JobWaitError):
@@ -26,12 +24,14 @@ async def wait_for_jobs(
     *,
     timeout: float = 600,
     poll_interval: float = 5,
+    batch: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return completed job records, polling all pending IDs in one request.
+    """Return completed job records; batch only when the backend supports it.
 
     Accept an initial job response (list or single record), or job IDs. Already
     completed successful records are not queried again. Failure and timeout errors
     intentionally include only IDs, never server-supplied error text or bodies.
+    Enable batch explicitly for the website backend; OpenAPI documents one ID per call.
     """
     if timeout <= 0 or poll_interval <= 0:
         raise ValueError("timeout and poll_interval must be positive")
@@ -68,25 +68,43 @@ async def wait_for_jobs(
             raise JobTimeoutError(
                 "Timed out waiting; jobs may still be running", sorted(pending)
             )
-        # Query all pending jobs together; no per-job requests or busy waiting.
-        response = await api.call(
-            "ack_job.DescribeJobs", {"jobUuid": ",".join(sorted(pending))}
-        )
-        if not isinstance(response, list):
-            raise JobWaitError("Unexpected job query response", sorted(pending))
-        for record in response:
-            if not isinstance(record, dict):
-                raise JobWaitError("Unexpected job query response", sorted(pending))
-            job_id = record.get("jobUuid")
-            if job_id not in pending:
-                continue
-            result[job_id] = record
-            if record.get("done") is True:
-                if record.get("success") is not True:
-                    raise JobWaitError(
-                        "Job failed or completion status is unknown", [job_id]
+        remaining = deadline - time.monotonic()
+        try:
+            async with asyncio.timeout(remaining):
+                if batch:
+                    responses = [
+                        await api.call(
+                            "ack_job.DescribeJobs",
+                            {"jobUuid": ",".join(sorted(pending))},
+                        )
+                    ]
+                else:
+                    responses = await asyncio.gather(
+                        *(
+                            api.call("ack_job.DescribeJobs", {"jobUuid": job_id})
+                            for job_id in sorted(pending)
+                        )
                     )
-                pending.remove(job_id)
+        except TimeoutError:
+            raise JobTimeoutError(
+                "Timed out waiting; jobs may still be running", sorted(pending)
+            ) from None
+        for response in responses:
+            if not isinstance(response, list):
+                raise JobWaitError("Unexpected job query response", sorted(pending))
+            for record in response:
+                if not isinstance(record, dict):
+                    raise JobWaitError("Unexpected job query response", sorted(pending))
+                job_id = record.get("jobUuid")
+                if job_id not in pending:
+                    continue
+                result[job_id] = record
+                if record.get("done") is True:
+                    if record.get("success") is not True:
+                        raise JobWaitError(
+                            "Job failed or completion status is unknown", [job_id]
+                        )
+                    pending.remove(job_id)
         if pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

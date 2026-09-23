@@ -426,7 +426,11 @@ async def show_lifecycle_jobs(api, args, jobs):
         )
     display(
         await wait_for_jobs(
-            api, jobs, timeout=args.timeout, poll_interval=args.poll_interval
+            api,
+            jobs,
+            timeout=args.timeout,
+            poll_interval=args.poll_interval,
+            batch=args.backend == "web",
         ),
         args,
     )
@@ -548,6 +552,7 @@ async def dispatch(args, api):
                     args.job_uuid,
                     timeout=args.timeout,
                     poll_interval=args.poll_interval,
+                    batch=args.backend == "web",
                 ),
                 args,
             )
@@ -630,7 +635,11 @@ def main(argv=None):
     try:
         asyncio.run(run(args))
     except JobWaitError as exc:
-        print(f"paratera: {exc}", file=sys.stderr)
+        backend = "--backend web " if args.backend == "web" else ""
+        print(
+            f"paratera: {exc}; check with 'paratera {backend}jobs get JOB_ID'",
+            file=sys.stderr,
+        )
         return 1
     except (CLIError, ValueError, OSError) as exc:
         print(f"paratera: {exc}", file=sys.stderr)

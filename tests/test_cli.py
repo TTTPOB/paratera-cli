@@ -273,7 +273,9 @@ def test_wait_failure_returns_nonzero_without_response_leak(monkeypatch, capsys)
     assert main(["jobs", "wait", "j", "--json"]) == 1
     output = capsys.readouterr()
     assert output.out == ""
-    assert "jobs get JOB_ID" in output.err
+    assert "paratera jobs get JOB_ID" in output.err
+    assert main(["--backend", "web", "jobs", "wait", "j"]) == 1
+    assert "paratera --backend web jobs get JOB_ID" in capsys.readouterr().err
 
 
 def test_wait_arguments_reject_nonpositive():
