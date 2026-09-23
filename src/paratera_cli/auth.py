@@ -1,7 +1,7 @@
 """Credential loading without executing or logging credential contents."""
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_CREDENTIALS_FILE = Path("~/.local/share/creds/paratera")
@@ -50,13 +50,22 @@ def load_credentials(
     env_secret = os.environ.get("PARATERA_SECRET_KEY")
     file_values = (
         _read_credentials_file(Path(credentials_file or DEFAULT_CREDENTIALS_FILE))
-        if (access_key is None and env_access is None) or (secret_key is None and env_secret is None)
+        if (access_key is None and env_access is None)
+        or (secret_key is None and env_secret is None)
         else {}
     )
     resolved_access = access_key if access_key is not None else env_access
     resolved_secret = secret_key if secret_key is not None else env_secret
-    resolved_access = resolved_access if resolved_access is not None else file_values.get("PARATERA_ACCESS_KEY")
-    resolved_secret = resolved_secret if resolved_secret is not None else file_values.get("PARATERA_SECRET_KEY")
+    resolved_access = (
+        resolved_access
+        if resolved_access is not None
+        else file_values.get("PARATERA_ACCESS_KEY")
+    )
+    resolved_secret = (
+        resolved_secret
+        if resolved_secret is not None
+        else file_values.get("PARATERA_SECRET_KEY")
+    )
     if not resolved_access or not resolved_secret:
         raise ValueError("Missing Paratera credentials")
     return Credentials(resolved_access, resolved_secret)

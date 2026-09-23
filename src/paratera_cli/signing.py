@@ -35,7 +35,7 @@ def sign_headers(
         f"\nparatera/aicloud/{service}\n{request_hash}"
     )
     signature = hmac.new(
-        f"BC_SIGNATURE&{credentials.secret_key}".encode("utf-8"),
+        f"BC_SIGNATURE&{credentials.secret_key}".encode(),
         string_to_sign.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
@@ -43,7 +43,9 @@ def sign_headers(
         "Content-Type": "application/json",
         f"{header_prefix}-Version": "V3",
         f"{header_prefix}-Action": action,
-        f"{header_prefix}-Timestamp": str(int(time.time()) if timestamp is None else timestamp),
+        f"{header_prefix}-Timestamp": str(
+            int(time.time()) if timestamp is None else timestamp
+        ),
         f"{header_prefix}-AccessKey": credentials.access_key,
         f"{header_prefix}-SignedHeaders": "content-type;host",
         f"{header_prefix}-Signature": signature,

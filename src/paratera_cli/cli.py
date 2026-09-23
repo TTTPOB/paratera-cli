@@ -4,15 +4,21 @@ import argparse
 import asyncio
 import json
 import os
-from pathlib import Path
-import tempfile
 import shlex
 import sys
+import tempfile
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from .auth import DEFAULT_CREDENTIALS_FILE
 from .client import ParateraError
-from .web import DEFAULT_SESSION_FILE, WEB_BASE_URL, WEB_OPERATIONS, WebClient, WebParateraAPI
+from .web import (
+    DEFAULT_SESSION_FILE,
+    WEB_BASE_URL,
+    WEB_OPERATIONS,
+    WebClient,
+    WebParateraAPI,
+)
 
 
 class CLIError(Exception):
@@ -20,63 +26,135 @@ class CLIError(Exception):
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="paratera", description="Paratera container CLI; requests use the asynchronous API client")
-    p.add_argument("--credentials-file", default=str(DEFAULT_CREDENTIALS_FILE), help="ENV=val credentials file (default: %(default)s); environment variables take precedence")
+    p = argparse.ArgumentParser(
+        prog="paratera",
+        description="Paratera container CLI; requests use the asynchronous API client",
+    )
+    p.add_argument(
+        "--credentials-file",
+        default=str(DEFAULT_CREDENTIALS_FILE),
+        help="ENV=val credentials file (default: %(default)s); environment variables take precedence",
+    )
     p.add_argument("--base-url", help="override backend's base URL")
-    p.add_argument("--backend", choices=("openapi", "web"), default="openapi", help="API backend (default: openapi)")
-    p.add_argument("--session-file", default=str(DEFAULT_SESSION_FILE), help="web session JSON (default: %(default)s)")
+    p.add_argument(
+        "--backend",
+        choices=("openapi", "web"),
+        default="openapi",
+        help="API backend (default: openapi)",
+    )
+    p.add_argument(
+        "--session-file",
+        default=str(DEFAULT_SESSION_FILE),
+        help="web session JSON (default: %(default)s)",
+    )
     p.add_argument("--json", action="store_true", help="print redacted JSON")
-    p.add_argument("--show-secrets", action="store_true", help="explicitly show SSH password and authenticated URLs")
+    p.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="explicitly show SSH password and authenticated URLs",
+    )
     commands = p.add_subparsers(dest="command", required=True)
 
     def leaf(parent, name, **kwargs):
         child = parent.add_parser(name, **kwargs)
-        child.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print redacted JSON")
-        child.add_argument("--show-secrets", action="store_true", default=argparse.SUPPRESS, help="show SSH password and authenticated URLs")
+        child.add_argument(
+            "--json",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="print redacted JSON",
+        )
+        child.add_argument(
+            "--show-secrets",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="show SSH password and authenticated URLs",
+        )
         return child
 
-    session = commands.add_parser("session", help="manage existing website login session")
-    leaf(session.add_subparsers(dest="session_action", required=True), "import", help="read token or JSON from stdin and store mode 0600")
+    session = commands.add_parser(
+        "session", help="manage existing website login session"
+    )
+    leaf(
+        session.add_subparsers(dest="session_action", required=True),
+        "import",
+        help="read token or JSON from stdin and store mode 0600",
+    )
     leaf(commands, "zones", help="list available zones")
-    for name, help_text in [("types", "list instance types"), ("availability", "check all instance types in one batch"), ("images", "list public images")]:
+    for name, help_text in [
+        ("types", "list instance types"),
+        ("availability", "check all instance types in one batch"),
+        ("images", "list public images"),
+    ]:
         c = leaf(commands, name, help=help_text)
         c.add_argument("--zone", help="zone code filter")
     c = leaf(commands, "get", help="list instances, or select one with --id")
     c.add_argument("--id", help="instance UUID")
     c.add_argument("--zone", help="zone code filter")
-    c.add_argument("--page", type=positive_int, default=1, help="page number (default: 1)")
-    c.add_argument("--page-size", type=positive_int, default=100, help="page size (default: 100)")
+    c.add_argument(
+        "--page", type=positive_int, default=1, help="page number (default: 1)"
+    )
+    c.add_argument(
+        "--page-size", type=positive_int, default=100, help="page size (default: 100)"
+    )
     for name in ("quote", "create"):
         c = leaf(commands, name, help="quote or create a container instance")
         c.add_argument("--zone", required=True, help="zoneCode")
         c.add_argument("--name", required=True, help="aliasName")
         c.add_argument("--model", required=True, help="serviceModel")
         c.add_argument("--image", required=True, help="imageUuid")
-        c.add_argument("--billing-type", choices=("PostPaid", "PrePaid"), default="PostPaid")
+        c.add_argument(
+            "--billing-type", choices=("PostPaid", "PrePaid"), default="PostPaid"
+        )
         c.add_argument("--count", type=positive_int, default=1)
         c.add_argument("--pay-period", type=positive_int, help="months for PrePaid")
     for name in ("ssh", "endpoints", "delete"):
-        c = leaf(commands, name, help={"ssh": "print a quoted ssh command (never execute it)", "endpoints": "show SSH, Jupyter and TensorBoard endpoints", "delete": "delete an instance (requires --yes)"}[name])
+        c = leaf(
+            commands,
+            name,
+            help={
+                "ssh": "print a quoted ssh command (never execute it)",
+                "endpoints": "show SSH, Jupyter and TensorBoard endpoints",
+                "delete": "delete an instance (requires --yes)",
+            }[name],
+        )
         target_flags(c)
         if name == "delete":
-            c.add_argument("--yes", action="store_true", help="confirm irreversible deletion")
+            c.add_argument(
+                "--yes", action="store_true", help="confirm irreversible deletion"
+            )
     power = commands.add_parser("power", help="manage instance power")
     power_commands = power.add_subparsers(dest="power_action", required=True)
     for name in ("on", "off", "reboot"):
         c = leaf(power_commands, name, help=f"power {name} one instance")
         target_flags(c)
         if name == "off":
-            c.add_argument("--discard-env", action="store_true", help="do not preserve files and environment (destructive)")
-            c.add_argument("--stopped-mode", choices=("STOP_CHARGING", "KEEP_CHARGING"), help="default: PostPaid STOP_CHARGING, PrePaid KEEP_CHARGING")
+            c.add_argument(
+                "--discard-env",
+                action="store_true",
+                help="do not preserve files and environment (destructive)",
+            )
+            c.add_argument(
+                "--stopped-mode",
+                choices=("STOP_CHARGING", "KEEP_CHARGING"),
+                help="default: PostPaid STOP_CHARGING, PrePaid KEEP_CHARGING",
+            )
     jobs = commands.add_parser("jobs", help="inspect asynchronous tasks")
-    c = leaf(jobs.add_subparsers(dest="jobs_action", required=True), "get", help="query a job once (no polling)")
+    c = leaf(
+        jobs.add_subparsers(dest="jobs_action", required=True),
+        "get",
+        help="query a job once (no polling)",
+    )
     c.add_argument("job_uuid", help="job UUID")
     api = commands.add_parser("api", help="low-level access to registered operations")
     api_commands = api.add_subparsers(dest="api_action", required=True)
     leaf(api_commands, "list", help="list registered service.Action operations")
-    c = leaf(api_commands, "call", help="call a registered operation with JSON parameters")
+    c = leaf(
+        api_commands, "call", help="call a registered operation with JSON parameters"
+    )
     c.add_argument("operation", help="service.Action from api list")
-    c.add_argument("--params", default="{}", help="JSON object or @filename with JSON object")
+    c.add_argument(
+        "--params", default="{}", help="JSON object or @filename with JSON object"
+    )
     return p
 
 
@@ -88,14 +166,36 @@ def positive_int(value: str) -> int:
 
 
 def target_flags(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--id", help="instance UUID; omitted only if exactly one instance exists")
-    p.add_argument("--zone", help="zoneCode; inferred from selected instance when omitted")
+    p.add_argument(
+        "--id", help="instance UUID; omitted only if exactly one instance exists"
+    )
+    p.add_argument(
+        "--zone", help="zoneCode; inferred from selected instance when omitted"
+    )
 
 
 def scrub(value, *, show_secrets=False):
     """Redact credential keys, URL userinfo and query strings, recursively."""
     if isinstance(value, dict):
-        return {key: ("[REDACTED]" if not show_secrets and any(word in key.lower() for word in ("password", "token", "secret", "credential", "accesskey", "access_key")) else scrub(item, show_secrets=show_secrets)) for key, item in value.items()}
+        return {
+            key: (
+                "[REDACTED]"
+                if not show_secrets
+                and any(
+                    word in key.lower()
+                    for word in (
+                        "password",
+                        "token",
+                        "secret",
+                        "credential",
+                        "accesskey",
+                        "access_key",
+                    )
+                )
+                else scrub(item, show_secrets=show_secrets)
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [scrub(item, show_secrets=show_secrets) for item in value]
     if isinstance(value, str) and not show_secrets and "://" in value:
@@ -106,7 +206,15 @@ def scrub(value, *, show_secrets=False):
         if parts.port:
             host += f":{parts.port}"
         user = f"{parts.username}@" if parts.username else ""
-        return urlunsplit((parts.scheme, user + host, parts.path, "[REDACTED]" if parts.query else "", "[REDACTED]" if parts.fragment else ""))
+        return urlunsplit(
+            (
+                parts.scheme,
+                user + host,
+                parts.path,
+                "[REDACTED]" if parts.query else "",
+                "[REDACTED]" if parts.fragment else "",
+            )
+        )
     return value
 
 
@@ -116,7 +224,10 @@ def display(value, args, *, columns=None):
         print(json.dumps(safe, ensure_ascii=False, indent=2, default=str))
         return
     rows = [[str(cell_at(item, path)) for path in columns.values()] for item in safe]
-    widths = [max(len(title), *(len(row[i]) for row in rows)) for i, title in enumerate(columns)]
+    widths = [
+        max(len(title), *(len(row[i]) for row in rows))
+        for i, title in enumerate(columns)
+    ]
     print("  ".join(title.ljust(widths[i]) for i, title in enumerate(columns)))
     for row in rows:
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
@@ -129,7 +240,14 @@ def cell_at(item, path):
 
 
 def create_params(args):
-    result = {"zoneCode": args.zone, "aliasName": args.name, "serviceModel": args.model, "imageUuid": args.image, "billingType": args.billing_type, "count": args.count}
+    result = {
+        "zoneCode": args.zone,
+        "aliasName": args.name,
+        "serviceModel": args.model,
+        "imageUuid": args.image,
+        "billingType": args.billing_type,
+        "count": args.count,
+    }
     if args.pay_period is not None:
         result["payPeriod"] = args.pay_period
     if args.billing_type == "PrePaid" and args.pay_period is None:
@@ -192,15 +310,28 @@ async def select_instance(api, args):
         if not isinstance(page, dict) or not isinstance(page.get("rows"), list):
             raise CLIError("Unexpected DescribeServices response (expected data.rows)")
         batch = page["rows"]
-        fingerprint = tuple((item.get("serviceUuid"), cell_at(item, "zone.zoneCode")) for item in batch)
+        fingerprint = tuple(
+            (item.get("serviceUuid"), cell_at(item, "zone.zoneCode")) for item in batch
+        )
         if batch and fingerprint in seen_pages:
-            raise CLIError("DescribeServices returned a repeated page; cannot select safely")
+            raise CLIError(
+                "DescribeServices returned a repeated page; cannot select safely"
+            )
         seen_pages.add(fingerprint)
-        rows.extend(item for item in batch if (not args.id or item.get("serviceUuid") == args.id) and (not args.zone or cell_at(item, "zone.zoneCode") == args.zone))
+        rows.extend(
+            item
+            for item in batch
+            if (not args.id or item.get("serviceUuid") == args.id)
+            and (not args.zone or cell_at(item, "zone.zoneCode") == args.zone)
+        )
         if len(rows) > 1:
-            raise CLIError("Multiple instances match; specify --id (and --zone if needed)")
+            raise CLIError(
+                "Multiple instances match; specify --id (and --zone if needed)"
+            )
         total = page.get("total")
-        if len(batch) < params["pageSize"] and not (isinstance(total, int) and total > params["pageNum"] * params["pageSize"]):
+        if len(batch) < params["pageSize"] and not (
+            isinstance(total, int) and total > params["pageNum"] * params["pageSize"]
+        ):
             break
         params["pageNum"] += 1
     if not rows:
@@ -224,7 +355,9 @@ def ssh_command(entry):
     host = url.hostname
     if ":" in host:
         host = f"[{host}]"
-    return " ".join(shlex.quote(part) for part in ("ssh", "-p", str(port), f"{url.username}@{host}"))
+    return " ".join(
+        shlex.quote(part) for part in ("ssh", "-p", str(port), f"{url.username}@{host}")
+    )
 
 
 async def dispatch(args, api):
@@ -235,29 +368,80 @@ async def dispatch(args, api):
                 display(sorted(WEB_OPERATIONS), args)
             else:
                 from .api import OPERATIONS
+
                 display(sorted(OPERATIONS), args)
         else:
             display(await api.call(args.operation, read_params(args.params)), args)
     elif cmd == "zones":
-        display(await api.call("region.DescribeZones"), args, columns={"zoneCode": "zoneCode", "zoneName": "zoneName", "region": "regionCode"})
+        display(
+            await api.call("region.DescribeZones"),
+            args,
+            columns={
+                "zoneCode": "zoneCode",
+                "zoneName": "zoneName",
+                "region": "regionCode",
+            },
+        )
     elif cmd in ("types", "availability"):
         types = await api.call("ack_product.DescribeACKServiceTypes")
         if not isinstance(types, list):
             raise CLIError("Unexpected service types response")
-        types = [item for item in types if not args.zone or cell_at(item, "zone.zoneCode") == args.zone]
+        types = [
+            item
+            for item in types
+            if not args.zone or cell_at(item, "zone.zoneCode") == args.zone
+        ]
         if cmd == "types":
-            display(types, args, columns={"zone": "zone.zoneCode", "model": "serviceModel", "GPU": "serviceGpus", "CPU": "serviceCpus", "memory(bytes)": "serviceMemory"})
+            display(
+                types,
+                args,
+                columns={
+                    "zone": "zone.zoneCode",
+                    "model": "serviceModel",
+                    "GPU": "serviceGpus",
+                    "CPU": "serviceCpus",
+                    "memory(bytes)": "serviceMemory",
+                },
+            )
         else:
-            models = [{"zoneCode": cell_at(item, "zone.zoneCode"), "serviceModel": item.get("serviceModel")} for item in types]
+            models = [
+                {
+                    "zoneCode": cell_at(item, "zone.zoneCode"),
+                    "serviceModel": item.get("serviceModel"),
+                }
+                for item in types
+            ]
             if not models:
                 display([], args)
             else:
-                display(await api.call("ack_product.DescribeACKAvailableResources", {"serviceModels": models}), args, columns={"zone": "zoneCode", "model": "serviceModel", "soldOut": "soldOut"})
+                display(
+                    await api.call(
+                        "ack_product.DescribeACKAvailableResources",
+                        {"serviceModels": models},
+                    ),
+                    args,
+                    columns={
+                        "zone": "zoneCode",
+                        "model": "serviceModel",
+                        "soldOut": "soldOut",
+                    },
+                )
     elif cmd == "images":
         images = await api.call("ack_product.DescribeACKPublicImages")
         if args.zone:
-            images = [item for item in images if cell_at(item, "zone.zoneCode") == args.zone]
-        display(images, args, columns={"UUID": "imageUuid", "image": "imageName", "GPU type": "vhostType", "zone": "zone.zoneCode"})
+            images = [
+                item for item in images if cell_at(item, "zone.zoneCode") == args.zone
+            ]
+        display(
+            images,
+            args,
+            columns={
+                "UUID": "imageUuid",
+                "image": "imageName",
+                "GPU type": "vhostType",
+                "zone": "zone.zoneCode",
+            },
+        )
     elif cmd == "get":
         params = {"pageNum": args.page, "pageSize": args.page_size}
         if args.id:
@@ -266,12 +450,24 @@ async def dispatch(args, api):
             params["zoneCode"] = args.zone
         data = await api.call("ackcs.DescribeServices", params)
         rows = data.get("rows", [])
-        display(data if args.json else rows, args, columns={"UUID": "serviceUuid", "name": "aliasName", "status": "serviceStatus", "zone": "zone.zoneCode", "billing": "billingType"})
+        display(
+            data if args.json else rows,
+            args,
+            columns={
+                "UUID": "serviceUuid",
+                "name": "aliasName",
+                "status": "serviceStatus",
+                "zone": "zone.zoneCode",
+                "billing": "billingType",
+            },
+        )
     elif cmd in ("quote", "create"):
         operation = "InquiryPriceCreateServices" if cmd == "quote" else "CreateServices"
         display(await api.call(f"ackcs.{operation}", create_params(args)), args)
     elif cmd == "jobs":
-        display(await api.call("ack_job.DescribeJobs", {"jobUuid": args.job_uuid}), args)
+        display(
+            await api.call("ack_job.DescribeJobs", {"jobUuid": args.job_uuid}), args
+        )
     elif cmd in ("ssh", "endpoints", "power", "delete"):
         if cmd == "delete" and not args.yes:
             raise CLIError("Deletion blocked: add --yes to confirm")
@@ -290,16 +486,24 @@ async def dispatch(args, api):
                     print("password:", entries[0]["password"])
         elif cmd == "endpoints":
             names = ("SSH", "Jupyter", "TensorBoard")
-            responses = await asyncio.gather(*(api.call(f"ackcs.DescribeServices{name}", target) for name in names))
+            responses = await asyncio.gather(
+                *(api.call(f"ackcs.DescribeServices{name}", target) for name in names)
+            )
             display(dict(zip((name.lower() for name in names), responses)), args)
         else:
             if cmd == "delete":
                 operation = "DeleteServices"
             else:
-                operation = {"on": "StartServices", "off": "StopServices", "reboot": "RebootServices"}[args.power_action]
+                operation = {
+                    "on": "StartServices",
+                    "off": "StopServices",
+                    "reboot": "RebootServices",
+                }[args.power_action]
                 if args.power_action == "off":
                     billing = instance.get("billingType")
-                    mode = args.stopped_mode or ("KEEP_CHARGING" if billing == "PrePaid" else "STOP_CHARGING")
+                    mode = args.stopped_mode or (
+                        "KEEP_CHARGING" if billing == "PrePaid" else "STOP_CHARGING"
+                    )
                     if billing == "PrePaid" and mode != "KEEP_CHARGING":
                         raise CLIError("PrePaid requires KEEP_CHARGING")
                     if billing == "PostPaid" and mode != "STOP_CHARGING":
@@ -317,12 +521,18 @@ async def run(args, api=None):
         await dispatch(args, api)
         return
     if args.backend == "web":
-        async with WebClient(session_file=args.session_file, base_url=args.base_url or WEB_BASE_URL) as client:
+        async with WebClient(
+            session_file=args.session_file, base_url=args.base_url or WEB_BASE_URL
+        ) as client:
             await dispatch(args, WebParateraAPI(client))
     else:
         from .api import ParateraAPI
         from .client import ParateraClient
-        async with ParateraClient(credentials_file=args.credentials_file, base_url=args.base_url or "https://ai.blsc.cn") as client:
+
+        async with ParateraClient(
+            credentials_file=args.credentials_file,
+            base_url=args.base_url or "https://ai.blsc.cn",
+        ) as client:
             await dispatch(args, ParateraAPI(client))
 
 
@@ -336,7 +546,7 @@ def main(argv=None):
     except ParateraError as exc:
         print(f"paratera: {exc}", file=sys.stderr)
         return 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - sanitize unexpected CLI failures
         # Unexpected errors must not expose response bodies or credentials.
         print(f"paratera: request failed ({type(exc).__name__})", file=sys.stderr)
         return 1

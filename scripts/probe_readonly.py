@@ -9,15 +9,45 @@ from paratera_cli import ParateraClient, ParateraError
 
 async def probe(header_prefix: str, base_url: str) -> None:
     try:
-        async with ParateraClient(header_prefix=header_prefix, base_url=base_url) as client:
-            data = await client.request("region", "DescribeZones", path="/v3/region/DescribeZones")
+        async with ParateraClient(
+            header_prefix=header_prefix, base_url=base_url
+        ) as client:
+            data = await client.request(
+                "region", "DescribeZones", path="/v3/region/DescribeZones"
+            )
     except ParateraError as exc:
-        print(json.dumps({"success": False, "error_type": type(exc).__name__, "status_code": exc.status_code, "business_code": exc.business_code}))
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error_type": type(exc).__name__,
+                    "status_code": exc.status_code,
+                    "business_code": exc.business_code,
+                }
+            )
+        )
         return
-    except Exception as exc:
-        print(json.dumps({"success": False, "error_type": type(exc).__name__, "status_code": None, "business_code": None}))
+    except Exception as exc:  # noqa: BLE001 - redact unexpected probe failures
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error_type": type(exc).__name__,
+                    "status_code": None,
+                    "business_code": None,
+                }
+            )
+        )
         return
-    print(json.dumps({"success": True, "data_type": type(data).__name__, "count": len(data) if isinstance(data, (list, dict)) else 0}))
+    print(
+        json.dumps(
+            {
+                "success": True,
+                "data_type": type(data).__name__,
+                "count": len(data) if isinstance(data, (list, dict)) else 0,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":
