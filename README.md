@@ -8,14 +8,25 @@
 
 ## 导入本人网页登录态
 
-浏览器登录后，将本人会话 token 从**标准输入**导入；接受原始 token 或含 `token` 字段的 JSON，**不要放在命令行参数或 Git**：
+续期的关键是**服务端 cookie**，不是 token：token 是 1 小时的 JWT，cookie 有效时 CLI 会用 `/platform/tsinghua/authAndGetCoupon` 自动换取新 token 并写回文件。
+
+浏览器登录后，在 `https://ai.paratera.com` 的开发者工具控制台执行：
+
+```js
+copy(JSON.stringify({ cookies: document.cookie, accessCode: localStorage.getItem('accessCode') }))
+```
+
+再经**标准输入**导入（**不要放在命令行参数或 Git**）：
 
 ```bash
-uv run paratera session import < /path/to/private-token-or-json
+pbpaste | uv run paratera session import   # 无 pbpaste 用 xclip -selection clipboard -o
+uv run paratera session refresh            # 可选：立即校验 cookie 是否还能换 token
 uv run paratera zones
 ```
 
-默认保存于 `~/.local/share/creds/paratera-session.json`，文件权限 **0600**；`--session-file PATH` 可更改路径，`PARATERA_TOKEN` 环境变量优先于文件。网页登录态请求包含 `token` 及 `Ai-Authorization: Bearer …`，**不是** AccessKey HMAC 签名；不实现自动登录或刷新。会话有效期限、关闭浏览器后的状态均未知，过期请重新登录并导入。请避免打印原始请求头、SSH 密码和带认证信息的 URL。
+默认保存于 `~/.local/share/creds/paratera-session.json`，文件权限 **0600**；`--session-file PATH` 可更改路径。导入 JSON 可含 `token`、`cookies`、`accessCode`：给出后两者才具备续期能力，只给 `token`（或使用 `PARATERA_TOKEN` 环境变量，其优先于文件且不读写文件）时按旧行为一次性使用。
+
+cookie 会话与清华统一认证 SSO 的真实期限均未验证；SSO 失效后无密码账号仍须在浏览器重新登录并再次导入。`session refresh` 报错即表示 cookie 已失效。网页登录态请求包含 `token` 及 `Ai-Authorization: Bearer …`，**不是** AccessKey HMAC 签名。请避免打印原始请求头、cookie、SSH 密码和带认证信息的 URL。
 
 ## 常用流程
 

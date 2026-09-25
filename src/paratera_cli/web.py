@@ -1,7 +1,10 @@
 """Session-token transport for observed website endpoints, not the signed OpenAPI."""
 
+import base64
 import json
 import os
+import tempfile
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
@@ -13,10 +16,48 @@ from .client import ParateraError
 
 DEFAULT_SESSION_FILE = Path("~/.local/share/creds/paratera-session.json")
 WEB_BASE_URL = "https://ai.paratera.com"
+# Observed session exchange: the website reissues its one-hour JWT from these cookies,
+# so a stored cookie jar keeps the CLI logged in without a password or a live browser.
+REFRESH_PATH = "/platform/tsinghua/authAndGetCoupon"
+REFRESH_ACCESS_KEY = "paraterA"
+REFRESH_MARGIN_SECONDS = 300
+EXPIRED_BUSINESS_CODES = frozenset({100005, 100006})
+
+
+def write_session_file(path: str | Path, session: Mapping[str, Any]) -> None:
+    """Write session JSON atomically with owner-only permissions."""
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(prefix=".paratera-session-", dir=destination.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(dict(session), file)
+            file.write("\n")
+        os.chmod(name, 0o600)
+        os.replace(name, destination)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def token_expiry(token: str) -> int | None:
+    """Return the unverified JWT exp claim, or None for an opaque token."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    try:
+        claims = json.loads(
+            base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        )
+    except (ValueError, TypeError):
+        return None
+    expiry = claims.get("exp") if isinstance(claims, dict) else None
+    return expiry if type(expiry) is int else None
 
 
 class WebClient:
-    """Use an existing logged-in browser session; never perform login or refresh."""
+    """Use a logged-in website session and renew its short-lived token from cookies."""
 
     def __init__(
         self,
@@ -26,24 +67,28 @@ class WebClient:
         timeout: float = 30,
         transport: httpx2.AsyncBaseTransport | None = None,
     ) -> None:
-        token = os.environ.get("PARATERA_TOKEN")
-        if not token:
-            try:
-                session = json.loads(
-                    Path(session_file).expanduser().read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError):
-                raise ValueError(
-                    "Cannot read web session JSON; import a logged-in session again"
-                ) from None
-            token = session.get("token") if isinstance(session, dict) else None
-        if not isinstance(token, str) or not token.strip():
-            raise ValueError(
-                "Missing web session token; import a logged-in session again"
-            )
-        self._token = token.strip()
+        self._session_file = Path(session_file).expanduser()
         self._base_url = base_url.rstrip("/")
         self._http = httpx2.AsyncClient(timeout=timeout, transport=transport)
+        env_token = os.environ.get("PARATERA_TOKEN")
+        # An environment token is explicit input: never read or rewrite the stored session.
+        self._session = {} if env_token else self._read_session()
+        token = env_token or self._session.get("token")
+        cookies = self._session.get("cookies")
+        access_code = self._session.get("accessCode")
+        self._token = (
+            token.strip() if isinstance(token, str) and token.strip() else None
+        )
+        self._cookies = (
+            cookies.strip() if isinstance(cookies, str) and cookies.strip() else None
+        )
+        self._access_code = (
+            access_code.strip()
+            if isinstance(access_code, str) and access_code.strip()
+            else None
+        )
+        if self._token is None and not self._refreshable():
+            raise ValueError("Missing web session; import a logged-in session again")
 
     def __repr__(self) -> str:
         return "WebClient(<redacted>)"
@@ -62,6 +107,91 @@ class WebClient:
     async def close(self) -> None:
         await self._http.aclose()
 
+    def _read_session(self) -> dict[str, Any]:
+        try:
+            session = json.loads(self._session_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError):
+            raise ValueError(
+                "Cannot read web session JSON; import a logged-in session again"
+            ) from None
+        return session if isinstance(session, dict) else {}
+
+    def _refreshable(self) -> bool:
+        return bool(self._cookies and self._access_code)
+
+    def _stale(self) -> bool:
+        if self._token is None:
+            return True
+        expiry = token_expiry(self._token)
+        return expiry is not None and expiry - time.time() <= REFRESH_MARGIN_SECONDS
+
+    async def refresh(self) -> int | None:
+        """Exchange stored website cookies for a fresh token; returns seconds left."""
+        if not self._refreshable():
+            raise ValueError(
+                "No website cookie session stored; import a logged-in session again"
+            )
+        try:
+            response = await self._http.get(
+                self._base_url + REFRESH_PATH,
+                params={
+                    "accessKey": REFRESH_ACCESS_KEY,
+                    "accessCode": self._access_code,
+                },
+                headers={"Cookie": self._cookies},
+            )
+        except httpx2.HTTPError:
+            raise ParateraError("Paratera website request failed") from None
+        token = response.headers.get("token")
+        if response.status_code != 200 or not token or not token.strip():
+            raise ParateraError(
+                "Website session expired; log in again and re-import session",
+                status_code=response.status_code,
+            )
+        self._token = token.strip()
+        self._persist_token()
+        expiry = token_expiry(self._token)
+        return None if expiry is None else max(0, int(expiry - time.time()))
+
+    def _persist_token(self) -> None:
+        """Cache the renewed token; a failed write only costs one extra refresh."""
+        try:
+            write_session_file(
+                self._session_file, {**self._session, "token": self._token}
+            )
+        except OSError:
+            pass
+
+    async def _send(self, method: str, path: str, body: Any) -> httpx2.Response:
+        headers: dict[str, str] = {}
+        if self._token is not None:
+            headers = {
+                "token": self._token,
+                "Ai-Authorization": f"Bearer {self._token}",
+            }
+        if self._cookies is not None:
+            headers["Cookie"] = self._cookies
+        try:
+            return await self._http.request(
+                method,
+                self._base_url + path,
+                headers=headers,
+                json=body if method == "POST" else None,
+            )
+        except httpx2.HTTPError:
+            raise ParateraError("Paratera website request failed") from None
+
+    @staticmethod
+    def _decode(response: httpx2.Response) -> tuple[Any, Any]:
+        try:
+            payload = response.json()
+        except (ValueError, TypeError):
+            payload = None
+        code = payload.get("code") if isinstance(payload, dict) else None
+        return payload, code
+
     async def request(
         self, path: str, body: Any = None, *, method: str = "POST"
     ) -> Any:
@@ -76,27 +206,21 @@ class WebClient:
             raise ValueError("Unsupported website endpoint path")
         if method not in {"GET", "POST"}:
             raise ValueError("Unsupported website request method")
-        headers = {"token": self._token, "Ai-Authorization": f"Bearer {self._token}"}
-        try:
-            response = await self._http.request(
-                method,
-                self._base_url + path,
-                headers=headers,
-                json=body if method == "POST" else None,
-            )
-        except httpx2.HTTPError:
-            raise ParateraError("Paratera website request failed") from None
+        if self._refreshable() and self._stale():
+            await self.refresh()
+        response = await self._send(method, path, body)
+        payload, code = self._decode(response)
+        expired = response.status_code == 401 or code in EXPIRED_BUSINESS_CODES
+        if expired and self._refreshable():
+            await self.refresh()
+            response = await self._send(method, path, body)
+            payload, code = self._decode(response)
         if response.status_code == 401:
             raise ParateraError(
                 "Website session expired (401); log in again and re-import session",
                 status_code=401,
             )
-        try:
-            payload = response.json()
-        except (ValueError, TypeError):
-            payload = None
-        code = payload.get("code") if isinstance(payload, dict) else None
-        if code == 100006:
+        if code in EXPIRED_BUSINESS_CODES:
             raise ParateraError(
                 "Website session expired; log in again and re-import session",
                 status_code=response.status_code,

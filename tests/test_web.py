@@ -1,7 +1,9 @@
 """Offline website-backend contract tests; no live credentials or requests."""
 
 import asyncio
+import base64
 import json
+import time
 
 import httpx2
 import pytest
@@ -240,5 +242,190 @@ def test_expired_session_has_no_response_body(tmp_path):
             with pytest.raises(ParateraError, match="log in again") as exc:
                 await client.request("/platform/jobs/ack", {})
             assert "private" not in str(exc.value)
+
+    asyncio.run(verify())
+
+
+def make_token(expiry: int, subject: str = "61300") -> str:
+    """Build an unsigned JWT-shaped token so tests never need real credentials."""
+
+    def segment(payload: dict) -> str:
+        raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+        return raw.rstrip("=")
+
+    claims = {"sub": subject, "exp": expiry}
+    return f"{segment({'typ': 'JWT', 'alg': 'HS512'})}.{segment(claims)}.signature"
+
+
+def test_session_import_stores_cookies(tmp_path, monkeypatch, capsys):
+    import io
+
+    payload = json.dumps(
+        {"cookies": "para_sess=abc;  has_auth=Y", "accessCode": "jWOG61300"}
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    path = tmp_path / "session.json"
+    assert main(["--session-file", str(path), "session", "import"]) == 0
+    assert json.loads(path.read_text()) == {
+        "cookies": "para_sess=abc; has_auth=Y",
+        "accessCode": "jWOG61300",
+    }
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert "para_sess" not in capsys.readouterr().out
+
+
+def test_session_import_warns_without_access_code(tmp_path, monkeypatch, capsys):
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"cookies": "a=b"})))
+    path = tmp_path / "session.json"
+    assert main(["--session-file", str(path), "session", "import"]) == 0
+    assert "accessCode" in capsys.readouterr().err
+
+
+def test_web_client_renews_token_from_stored_cookies(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARATERA_TOKEN", raising=False)
+    session = tmp_path / "session.json"
+    session.write_text(
+        json.dumps(
+            {
+                "token": "stale",
+                "cookies": "para_sess=abc; has_auth=Y",
+                "accessCode": "jWOG61300",
+            }
+        ),
+        encoding="utf-8",
+    )
+    fresh = make_token(int(time.time()) + 3600)
+    exchanges = []
+
+    def handler(request):
+        if request.url.path.endswith("authAndGetCoupon"):
+            exchanges.append(request)
+            return httpx2.Response(
+                200, headers={"token": fresh}, json={"code": 200, "data": {}}
+            )
+        if request.headers.get("token") == "stale":
+            return httpx2.Response(401, json={"code": 100005, "message": "token失效"})
+        return httpx2.Response(200, json={"code": 200, "data": [{"jobUuid": "job-1"}]})
+
+    async def verify():
+        async with WebClient(
+            session_file=session, transport=httpx2.MockTransport(handler)
+        ) as client:
+            assert await client.request("/platform/jobs/ack", {"jobUuids": ["j1"]}) == [
+                {"jobUuid": "job-1"}
+            ]
+
+    asyncio.run(verify())
+    assert len(exchanges) == 1
+    refresh = exchanges[0]
+    assert refresh.url.params["accessCode"] == "jWOG61300"
+    assert refresh.headers.get("cookie") == "para_sess=abc; has_auth=Y"
+    assert refresh.headers.get("token") is None
+    stored = json.loads(session.read_text())
+    assert stored == {
+        "token": fresh,
+        "cookies": "para_sess=abc; has_auth=Y",
+        "accessCode": "jWOG61300",
+    }
+    assert session.stat().st_mode & 0o777 == 0o600
+
+
+def test_web_client_refreshes_before_request_when_token_expired(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARATERA_TOKEN", raising=False)
+    session = tmp_path / "session.json"
+    session.write_text(
+        json.dumps(
+            {
+                "token": make_token(int(time.time()) - 10),
+                "cookies": "para_sess=abc",
+                "accessCode": "code-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    fresh = make_token(int(time.time()) + 3600)
+    api_tokens = []
+
+    def handler(request):
+        if request.url.path.endswith("authAndGetCoupon"):
+            return httpx2.Response(
+                200, headers={"token": fresh}, json={"code": 200, "data": {}}
+            )
+        api_tokens.append(request.headers.get("token"))
+        return httpx2.Response(200, json={"code": 200, "data": []})
+
+    async def verify():
+        async with WebClient(
+            session_file=session, transport=httpx2.MockTransport(handler)
+        ) as client:
+            await client.request("/platform/jobs/ack", {})
+
+    asyncio.run(verify())
+    assert api_tokens == [fresh]
+
+
+def test_web_client_starts_from_cookies_only(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARATERA_TOKEN", raising=False)
+    session = tmp_path / "session.json"
+    session.write_text(
+        json.dumps({"cookies": "para_sess=abc", "accessCode": "code-1"}),
+        encoding="utf-8",
+    )
+    fresh = make_token(int(time.time()) + 3600)
+
+    def handler(request):
+        if request.url.path.endswith("authAndGetCoupon"):
+            return httpx2.Response(
+                200, headers={"token": fresh}, json={"code": 200, "data": {}}
+            )
+        assert request.headers.get("token") == fresh
+        return httpx2.Response(200, json={"code": 200, "data": [1]})
+
+    async def verify():
+        async with WebClient(
+            session_file=session, transport=httpx2.MockTransport(handler)
+        ) as client:
+            assert await client.request("/platform/jobs/ack", {}) == [1]
+
+    asyncio.run(verify())
+    assert json.loads(session.read_text())["token"] == fresh
+
+
+def test_web_client_reports_unrefreshable_expiry(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARATERA_TOKEN", raising=False)
+    session = tmp_path / "session.json"
+    session.write_text(json.dumps({"cookies": "para_sess=abc"}), encoding="utf-8")
+
+    async def verify():
+        with pytest.raises(ValueError, match="logged-in session"):
+            WebClient(
+                session_file=session, transport=httpx2.MockTransport(lambda r: None)
+            )
+
+    asyncio.run(verify())
+
+
+def test_web_client_rejects_dead_cookie_session(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARATERA_TOKEN", raising=False)
+    session = tmp_path / "session.json"
+    session.write_text(
+        json.dumps({"cookies": "para_sess=dead", "accessCode": "code-1"}),
+        encoding="utf-8",
+    )
+
+    def handler(request):
+        if request.url.path.endswith("authAndGetCoupon"):
+            return httpx2.Response(200, json={"code": 200, "data": {}})
+        return httpx2.Response(200, json={"code": 200, "data": []})
+
+    async def verify():
+        async with WebClient(
+            session_file=session, transport=httpx2.MockTransport(handler)
+        ) as client:
+            with pytest.raises(ParateraError, match="log in again") as exc:
+                await client.request("/platform/jobs/ack", {})
+            assert "para_sess" not in str(exc.value)
 
     asyncio.run(verify())

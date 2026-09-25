@@ -3,11 +3,10 @@
 import argparse
 import asyncio
 import json
-import os
 import shlex
 import sys
-import tempfile
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .auth import DEFAULT_CREDENTIALS_FILE
@@ -19,6 +18,7 @@ from .web import (
     WEB_OPERATIONS,
     WebClient,
     WebParateraAPI,
+    write_session_file,
 )
 
 
@@ -75,10 +75,16 @@ def parser() -> argparse.ArgumentParser:
     session = commands.add_parser(
         "session", help="manage existing website login session"
     )
+    session_actions = session.add_subparsers(dest="session_action", required=True)
     leaf(
-        session.add_subparsers(dest="session_action", required=True),
+        session_actions,
         "import",
-        help="read token or JSON from stdin and store mode 0600",
+        help="read token/cookies JSON from stdin and store mode 0600",
+    )
+    leaf(
+        session_actions,
+        "refresh",
+        help="renew the stored token from the stored website cookies",
     )
     leaf(commands, "zones", help="list available zones")
     for name, help_text in [
@@ -305,30 +311,54 @@ def create_params(args):
     return result
 
 
+def _clean_token(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    token = value.strip().removeprefix("Bearer ").strip()
+    if not token:
+        return None
+    if any(char.isspace() for char in token):
+        raise CLIError("Invalid session token")
+    return token
+
+
 def import_session(path: str | Path) -> None:
+    """Store a token, a website cookie jar, or both; cookies enable refresh."""
     raw = sys.stdin.read().strip()
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         parsed = raw
-    token = parsed.get("token") if isinstance(parsed, dict) else parsed
-    if not isinstance(token, str):
-        raise CLIError("Session input must be a token or JSON with token")
-    token = token.strip().removeprefix("Bearer ").strip()
-    if not token or any(char.isspace() for char in token):
-        raise CLIError("Invalid session token")
-    destination = Path(path).expanduser()
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, name = tempfile.mkstemp(prefix=".paratera-session-", dir=destination.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump({"token": token}, file)
-            file.write("\n")
-        os.chmod(name, 0o600)
-        os.replace(name, destination)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
+    session: dict[str, str] = {}
+    if isinstance(parsed, dict):
+        token = _clean_token(parsed.get("token"))
+        if token is not None:
+            session["token"] = token
+        cookies = parsed.get("cookies")
+        if isinstance(cookies, str) and cookies.strip():
+            session["cookies"] = " ".join(cookies.split())
+        access_code = parsed.get("accessCode")
+        if isinstance(access_code, str) and access_code.strip():
+            session["accessCode"] = access_code.strip()
+    else:
+        token = _clean_token(parsed)
+        if token is not None:
+            session["token"] = token
+    if not session:
+        raise CLIError("Session input must provide token or cookies")
+    if "cookies" in session and "accessCode" not in session:
+        print(
+            "paratera: cookies stored without accessCode; token refresh stays off",
+            file=sys.stderr,
+        )
+    write_session_file(path, session)
+
+
+async def refresh_session(path: str | Path, base_url: str) -> None:
+    async with WebClient(session_file=path, base_url=base_url) as client:
+        remaining = await client.refresh()
+    suffix = f"; valid for {remaining} s" if remaining is not None else ""
+    print(f"paratera: website session token refreshed{suffix}")
 
 
 def read_params(raw):
@@ -610,6 +640,8 @@ async def run(args, api=None):
     if args.command == "session":
         if args.session_action == "import":
             import_session(args.session_file)
+        elif args.session_action == "refresh":
+            await refresh_session(args.session_file, args.base_url or WEB_BASE_URL)
         return
     if api is not None or (args.command == "api" and args.api_action == "list"):
         await dispatch(args, api)
