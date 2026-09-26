@@ -27,6 +27,29 @@ class CLIError(Exception):
     """A user-facing CLI error."""
 
 
+# Printed to stderr next to `types --json`, because JSON cannot carry comments.
+TYPES_NOTES = """\
+types field notes (JSON keeps raw backend values):
+  serviceTypeAlias   resource type, e.g. RTX4090 / RTX5090 / vGPU-RTX4090
+  serviceGpus        GPU count as a float; below 1 is a vGPU slice (0.1 = 1/10)
+  serviceGpumem      GPU VRAM in bytes (the website "显存" column)
+  serviceMemory      system memory in bytes
+  serviceCpus        vCPU count
+  localSysdiskSize   system disk in GB (already GB, not bytes)
+  localDatadiskSize  data disk in GB, returned as a string
+  strategies.*       current price: PostPaid per hour, PrePaid per month, in CNY
+  listPrice.*        undiscounted price in the same units; 0 means unpublished
+  originalPrice      always equal to listPrice
+  serviceSpecs       JSON string; some rows are stale, prefer the top-level fields
+"""
+
+TYPES_EPILOG = """\
+The table renders GPU VRAM and memory in GB, vGPU slices as 1/10, and prices in
+CNY with an hourly list price that is dashed when there is no discount. --json
+keeps the raw backend fields and prints a field and unit legend to stderr.
+"""
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="paratera",
@@ -49,7 +72,11 @@ def parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_SESSION_FILE),
         help="web session JSON (default: %(default)s)",
     )
-    p.add_argument("--json", action="store_true", help="print redacted JSON")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="print redacted JSON (types explains its fields and units on stderr)",
+    )
     p.add_argument(
         "--show-secrets",
         action="store_true",
@@ -63,7 +90,7 @@ def parser() -> argparse.ArgumentParser:
             "--json",
             action="store_true",
             default=argparse.SUPPRESS,
-            help="print redacted JSON",
+            help="print redacted JSON (types explains fields and units on stderr)",
         )
         child.add_argument(
             "--show-secrets",
@@ -93,7 +120,12 @@ def parser() -> argparse.ArgumentParser:
         ("availability", "check all instance types in one batch"),
         ("images", "list public images"),
     ]:
-        c = leaf(commands, name, help=help_text)
+        c = leaf(
+            commands,
+            name,
+            help=help_text,
+            epilog=TYPES_EPILOG if name == "types" else None,
+        )
         c.add_argument("--zone", help="zone code filter")
     c = leaf(commands, "get", help="list instances, or select one with --id")
     c.add_argument("--id", help="instance UUID")
@@ -273,22 +305,33 @@ def scrub(value, *, show_secrets=False):
     return value
 
 
-def _column(spec: Any) -> tuple[str, Callable[[Any], str]]:
+def _column(spec: Any) -> tuple[str, Callable[[Any, Any], str]]:
     """A column is a JSON path, or a (path, formatter) pair for readable cells."""
     if isinstance(spec, tuple):
         path, formatter = spec
         return path, formatter
-    return spec, str
+    return spec, _text
+
+
+def _text(value: Any, _item: Any = None) -> str:
+    return str(value)
 
 
 def _number(value: Any) -> float | None:
-    """Return value as a float, or None when it is not a plain number."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    """Return value as a float; numeric strings count, other values do not."""
+    if isinstance(value, bool):
         return None
-    return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
-def _bytes_to_gb(value: Any) -> str:
+def _bytes_to_gb(value: Any, _item: Any = None) -> str:
     """Render a byte count as GB; anything else passes through unchanged."""
     number = _number(value)
     if number is None:
@@ -300,7 +343,7 @@ def _bytes_to_gb(value: Any) -> str:
     return f"{gigabytes:.0f}GB" if whole else f"{gigabytes:.1f}GB"
 
 
-def _gigabytes(value: Any) -> str:
+def _gigabytes(value: Any, _item: Any = None) -> str:
     """Render a count already expressed in GB."""
     number = _number(value)
     if number is None:
@@ -308,7 +351,7 @@ def _gigabytes(value: Any) -> str:
     return f"{number:g}GB"
 
 
-def _gpu_count(value: Any) -> str:
+def _gpu_count(value: Any, _item: Any = None) -> str:
     """Render a GPU count, showing a vGPU slice such as 1/10 below one card."""
     number = _number(value)
     if number is None:
@@ -320,15 +363,37 @@ def _gpu_count(value: Any) -> str:
     return f"{number:g}"
 
 
-def display(value, args, *, columns=None):
+def _yuan(value: Any, _item: Any = None) -> str:
+    """Render a CNY amount; the backend mixes numbers and numeric strings."""
+    number = _number(value)
+    if number is None:
+        return "" if value is None else str(value)
+    return f"¥{number:.2f}"
+
+
+def _list_price(value: Any, item: Any = None) -> str:
+    """Render the undiscounted price, dashed when the website shows no discount."""
+    listed = _number(value)
+    if listed is None:
+        return "" if value is None else str(value)
+    current = _number(cell_at(item, "strategies.PostPaid.unitPrice"))
+    if current is not None and listed <= current:
+        return "-"
+    return _yuan(listed)
+
+
+def display(value, args, *, columns=None, notes=None):
     safe = scrub(value, show_secrets=args.show_secrets)
     if args.json or not isinstance(safe, list) or not safe or not columns:
         print(json.dumps(safe, ensure_ascii=False, indent=2, default=str))
+        if args.json and notes:
+            print(notes, file=sys.stderr)
         return
     titles = list(columns)
     specs = [_column(spec) for spec in columns.values()]
     rows = [
-        [formatter(cell_at(item, path)) for path, formatter in specs] for item in safe
+        [formatter(cell_at(item, path), item) for path, formatter in specs]
+        for item in safe
     ]
     widths = [
         max(len(title), *(len(row[i]) for row in rows))
@@ -562,7 +627,10 @@ async def dispatch(args, api):
                     "CPU": "serviceCpus",
                     "memory": ("serviceMemory", _bytes_to_gb),
                     "sysdisk": ("localSysdiskSize", _gigabytes),
+                    "list(¥/h)": ("listPrice.PostPaid.unitPrice", _list_price),
+                    "price(¥/h)": ("strategies.PostPaid.unitPrice", _yuan),
                 },
+                notes=TYPES_NOTES,
             )
         else:
             models = [

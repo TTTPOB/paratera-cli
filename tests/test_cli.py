@@ -95,7 +95,7 @@ def test_availability_batches_all_zone_models(capsys):
     assert json.loads(capsys.readouterr().out)[0]["soldOut"] is False
 
 
-def test_types_table_uses_readable_units(capsys):
+def test_types_table_and_json_annotate_units_and_prices(capsys):
     types = [
         {
             "zone": {"zoneCode": "z"},
@@ -106,6 +106,8 @@ def test_types_table_uses_readable_units(capsys):
             "serviceMemory": 257698037760,
             "serviceCpus": 28,
             "localSysdiskSize": 30,
+            "listPrice": {"PostPaid": {"unitPrice": 9}},
+            "strategies": {"PostPaid": {"unitPrice": 5.96}},
         },
         {
             "zone": {"zoneCode": "z"},
@@ -116,17 +118,25 @@ def test_types_table_uses_readable_units(capsys):
             "serviceMemory": 12884901888,
             "serviceCpus": 1,
             "localSysdiskSize": 30,
+            # The backend returns this one as a numeric string, not a number.
+            "listPrice": {"PostPaid": {"unitPrice": "0.00000"}},
+            "strategies": {"PostPaid": {"unitPrice": 0.3}},
         },
     ]
     responses = {"ack_product.DescribeACKServiceTypes": types}
     execute(["types", "--zone", "z"], responses)
-    table = capsys.readouterr().out
-    assert "64GB" in table and "3.2GB" in table
-    assert "1/10" in table and "vGPU-RTX5090" in table
-    assert "30GB" in table
+    out, err = capsys.readouterr()
+    assert "64GB" in out and "3.2GB" in out
+    assert "1/10" in out and "vGPU-RTX5090" in out
+    assert "30GB" in out
+    assert "¥9.00" in out and "¥5.96" in out and "¥0.30" in out
+    assert "¥0.00" not in out  # string zero is not a discount, so it is dashed
+    assert err == ""
     execute(["types", "--zone", "z", "--json"], responses)
-    raw = json.loads(capsys.readouterr().out)
-    assert raw[0]["serviceGpumem"] == 68719476736
+    out, err = capsys.readouterr()
+    assert json.loads(out)[0]["serviceGpumem"] == 68719476736
+    assert "serviceGpumem" in err and "in bytes" in err
+    assert "listPrice" in err and "per hour" in err
 
 
 def test_select_instance_requires_exactly_one_and_paginates():
