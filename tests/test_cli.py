@@ -95,6 +95,40 @@ def test_availability_batches_all_zone_models(capsys):
     assert json.loads(capsys.readouterr().out)[0]["soldOut"] is False
 
 
+def test_types_table_uses_readable_units(capsys):
+    types = [
+        {
+            "zone": {"zoneCode": "z"},
+            "serviceTypeAlias": "RTX5090",
+            "serviceModel": "rtx5090.xeon6530.2xlarge",
+            "serviceGpus": 2.0,
+            "serviceGpumem": 68719476736,
+            "serviceMemory": 257698037760,
+            "serviceCpus": 28,
+            "localSysdiskSize": 30,
+        },
+        {
+            "zone": {"zoneCode": "z"},
+            "serviceTypeAlias": "vGPU-RTX5090",
+            "serviceModel": "vgpu.split10.rtx5090.xeon6530.xlarge",
+            "serviceGpus": 0.1,
+            "serviceGpumem": 3435973836,
+            "serviceMemory": 12884901888,
+            "serviceCpus": 1,
+            "localSysdiskSize": 30,
+        },
+    ]
+    responses = {"ack_product.DescribeACKServiceTypes": types}
+    execute(["types", "--zone", "z"], responses)
+    table = capsys.readouterr().out
+    assert "64GB" in table and "3.2GB" in table
+    assert "1/10" in table and "vGPU-RTX5090" in table
+    assert "30GB" in table
+    execute(["types", "--zone", "z", "--json"], responses)
+    raw = json.loads(capsys.readouterr().out)
+    assert raw[0]["serviceGpumem"] == 68719476736
+
+
 def test_select_instance_requires_exactly_one_and_paginates():
     args = parser().parse_args(["ssh"])
 

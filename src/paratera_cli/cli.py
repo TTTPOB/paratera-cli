@@ -5,6 +5,7 @@ import asyncio
 import json
 import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -272,17 +273,68 @@ def scrub(value, *, show_secrets=False):
     return value
 
 
+def _column(spec: Any) -> tuple[str, Callable[[Any], str]]:
+    """A column is a JSON path, or a (path, formatter) pair for readable cells."""
+    if isinstance(spec, tuple):
+        path, formatter = spec
+        return path, formatter
+    return spec, str
+
+
+def _number(value: Any) -> float | None:
+    """Return value as a float, or None when it is not a plain number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _bytes_to_gb(value: Any) -> str:
+    """Render a byte count as GB; anything else passes through unchanged."""
+    number = _number(value)
+    if number is None:
+        return "" if value is None else str(value)
+    if number == 0:
+        return "0GB"
+    gigabytes = number / 1024**3
+    whole = abs(gigabytes - round(gigabytes)) < 1e-9
+    return f"{gigabytes:.0f}GB" if whole else f"{gigabytes:.1f}GB"
+
+
+def _gigabytes(value: Any) -> str:
+    """Render a count already expressed in GB."""
+    number = _number(value)
+    if number is None:
+        return "" if value is None else str(value)
+    return f"{number:g}GB"
+
+
+def _gpu_count(value: Any) -> str:
+    """Render a GPU count, showing a vGPU slice such as 1/10 below one card."""
+    number = _number(value)
+    if number is None:
+        return "" if value is None else str(value)
+    if 0 < number < 1:
+        parts = round(1 / number)
+        if parts and abs(number - 1 / parts) < 1e-9:
+            return f"1/{parts}"
+    return f"{number:g}"
+
+
 def display(value, args, *, columns=None):
     safe = scrub(value, show_secrets=args.show_secrets)
     if args.json or not isinstance(safe, list) or not safe or not columns:
         print(json.dumps(safe, ensure_ascii=False, indent=2, default=str))
         return
-    rows = [[str(cell_at(item, path)) for path in columns.values()] for item in safe]
+    titles = list(columns)
+    specs = [_column(spec) for spec in columns.values()]
+    rows = [
+        [formatter(cell_at(item, path)) for path, formatter in specs] for item in safe
+    ]
     widths = [
         max(len(title), *(len(row[i]) for row in rows))
-        for i, title in enumerate(columns)
+        for i, title in enumerate(titles)
     ]
-    print("  ".join(title.ljust(widths[i]) for i, title in enumerate(columns)))
+    print("  ".join(title.ljust(widths[i]) for i, title in enumerate(titles)))
     for row in rows:
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
 
@@ -503,10 +555,13 @@ async def dispatch(args, api):
                 args,
                 columns={
                     "zone": "zone.zoneCode",
+                    "type": "serviceTypeAlias",
                     "model": "serviceModel",
-                    "GPU": "serviceGpus",
+                    "GPU": ("serviceGpus", _gpu_count),
+                    "VRAM": ("serviceGpumem", _bytes_to_gb),
                     "CPU": "serviceCpus",
-                    "memory(bytes)": "serviceMemory",
+                    "memory": ("serviceMemory", _bytes_to_gb),
+                    "sysdisk": ("localSysdiskSize", _gigabytes),
                 },
             )
         else:
